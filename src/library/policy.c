@@ -31,6 +31,7 @@
 #include <string.h>
 #include <limits.h>
 #include <stdlib.h>
+#include <sys/fanotify.h>
 
 #include "file.h"
 #include "rules.h"
@@ -390,9 +391,8 @@ decision_t process_event(event_t *e)
 void make_policy_decision(const struct fanotify_event_metadata *metadata,
 						int fd, uint64_t mask)
 {
-	struct fanotify_response response;
 	event_t e;
-	int decision;
+	unsigned int decision;
 
 	if (new_event(metadata, &e))
 		decision = FAN_DENY;
@@ -405,13 +405,32 @@ void make_policy_decision(const struct fanotify_event_metadata *metadata,
 		allowed++;
 
 	if (metadata->mask & mask) {
+		struct fanotify_response response;
+		int rc;
+
 		response.fd = metadata->fd;
 		if (permissive)
 			response.response = FAN_ALLOW;
-		else
+		else {
 			response.response = decision & FAN_RESPONSE_MASK;
+#ifdef FAN_DEC_MASK
+			lnode *r = rules_get_cur(&rules);
+			if (r && FAN_DEC_CONTEXT_VALUE_VALID(r->num + 1))
+				response.response |= FAN_DEC_CONTEXT_TYPE_RULE |
+					FAN_DEC_CONTEXT_VALUE(r->num + 1);
+#endif
+		}
 		close(metadata->fd);
-		write(fd, &response, sizeof(struct fanotify_response));
+		rc = write(fd, &response, sizeof(struct fanotify_response));
+
+#ifdef FAN_DEC_MASK
+		// Older kernels may reject the context bits
+		if (rc < 0 && errno == EINVAL && response.response &
+				(FAN_DEC_CONTEXT_TYPE|FAN_DEC_CONTEXT)) {
+			response.response &= FAN_RESPONSE_MASK;
+			write(fd, &response, sizeof(struct fanotify_response));
+		}
+#endif
 	}
 }
 
