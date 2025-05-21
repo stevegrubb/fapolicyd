@@ -621,19 +621,21 @@ static int create_database(int with_sync)
 	msg(LOG_INFO, "Creating trust database");
 	int rc = 0;
 
-	for (backend_entry *be = backend_get_first() ; be != NULL ;
-						     be = be->next ) {
+	for (backend_entry *be = backend_get_first();
+				be != NULL && !stop; be = be->next) {
 		msg(LOG_INFO,"Loading trust data from %s backend",
 		    be->backend->name);
 
 		list_item_t *item = list_get_first(&be->backend->list);
-		for (; item != NULL; item = item->next) {
+		for (; item != NULL && !stop; item = item->next) {
 			if ((rc = write_db(item->index, item->data)))
 				msg(LOG_ERR,
 				    "Error (%d) writing key=\"%s\" data=\"%s\"",
 				    rc, (const char*)item->index,
 				    (const char*)item->data);
 		}
+		if (stop)
+			break;
 	}
 	// Flush everything to disk
 	if (with_sync)
@@ -641,6 +643,9 @@ static int create_database(int with_sync)
 
 	// Check if database is getting full and warn
 	check_db_size();
+
+	if (stop)
+		return 1;
 
 	return rc;
 }
@@ -704,14 +709,14 @@ static int check_database_copy(void)
 	long backend_total_entries = 0;
 	long backend_added_entries = 0;
 
-	for (backend_entry *be = backend_get_first() ; be != NULL ;
-							 be = be->next ) {
+	for (backend_entry *be = backend_get_first();
+				be != NULL && !stop; be = be->next) {
 		msg(LOG_INFO, "Importing trust data from %s backend",
 							 be->backend->name);
 
 		backend_total_entries += be->backend->list.count;
 		list_item_t *item = list_get_first(&be->backend->list);
-		for (; item != NULL; item = item->next) {
+		for (; item != NULL && !stop; item = item->next) {
 
 			int matched = 0;
 			int found = check_data_presence(item->index,
@@ -734,6 +739,8 @@ static int check_database_copy(void)
 					msg(LOG_DEBUG, "Trust data miscompare for %s",
 					    (char*)item->index);
 				}
+				if (stop)
+					break;
 			}
 		}
 	}
@@ -777,6 +784,10 @@ static int check_database_copy(void)
 		return 1;
 	} else
 		msg(LOG_INFO, "Trust database checks OK");
+
+	if (stop)
+		return 1;
+
 	return 0;
 }
 
@@ -1300,6 +1311,9 @@ static void *update_thread_main(void *arg)
 
 		rc = poll(ffd, 1, 1000);
 
+		if (stop)
+			break;
+
 		if (reload_rules) {
 			reload_rules = false;
 			load_rule_file();
@@ -1323,6 +1337,8 @@ static void *update_thread_main(void *arg)
 #ifdef DEBUG
 				msg(LOG_DEBUG, "update poll rc = EINTR");
 #endif
+				if (stop)
+					break;
 				continue;
 			} else {
 				msg(LOG_ERR, "Update poll error (%s)",
@@ -1333,14 +1349,20 @@ static void *update_thread_main(void *arg)
 #ifdef DEBUG
 			msg(LOG_DEBUG, "Update poll timeout expired");
 #endif
+			if (stop)
+				break;
 			continue;
 		} else {
 			if (ffd[0].revents & POLLIN) {
 
 				fd_fgets_context_t * fd_fgets_context = fd_fgets_init();
 				do {
+					if (stop)
+						break;
 					fd_fgets_rewind(fd_fgets_context);
-					int res = fd_fgets(fd_fgets_context, buff, sizeof(buff), ffd[0].fd);
+					int res = fd_fgets(fd_fgets_context,
+							   buff, sizeof(buff),
+							   ffd[0].fd);
 
 					// nothing to read
 					if (res == -1)
@@ -1413,7 +1435,7 @@ static void *update_thread_main(void *arg)
 						}
 					}
 
-				} while(!fd_fgets_eof(fd_fgets_context));
+				} while(!fd_fgets_eof(fd_fgets_context) && !stop);
 				fd_fgets_destroy(fd_fgets_context);
 			}
 		}
