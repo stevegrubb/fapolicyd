@@ -1337,8 +1337,6 @@ static void *update_thread_main(void *arg)
 #ifdef DEBUG
 				msg(LOG_DEBUG, "update poll rc = EINTR");
 #endif
-				if (stop)
-					break;
 				continue;
 			} else {
 				msg(LOG_ERR, "Update poll error (%s)",
@@ -1349,8 +1347,6 @@ static void *update_thread_main(void *arg)
 #ifdef DEBUG
 			msg(LOG_DEBUG, "Update poll timeout expired");
 #endif
-			if (stop)
-				break;
 			continue;
 		} else {
 			if (ffd[0].revents & POLLIN) {
