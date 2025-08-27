@@ -39,9 +39,16 @@ typedef struct _backend
 {
 	const char * name;
 	int (*init)(void);
+	/*
+	 * load populates @list with trust entries.
+	 * load_fd streams trust data into the supplied @memfd; both may
+	 * coexist during migration.
+	 */
 	int (*load)(const conf_t *);
+	int (*load_fd)(const conf_t *, int fd);
 	int (*close)(void);
 	list_t list;
+	int memfd;
 } backend;
 
 #endif

@@ -73,9 +73,11 @@ backend rpm_backend =
 	"rpmdb",
 	rpm_init_backend,
 	rpm_load_list,
+	NULL,
 	rpm_destroy_backend,
 	/* list initialization */
 	{ 0, 0, NULL },
+	-1,
 };
 
 static rpmts ts = NULL;
@@ -124,7 +126,7 @@ static int get_next_file_rpm(void)
 			fi = NULL;
 			return 0;
 		}
-        }
+	}
 	return 1;
 }
 

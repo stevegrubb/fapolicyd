@@ -44,8 +44,10 @@ backend file_backend =
 	"file",
 	file_init_backend,
 	file_load_list,
+	NULL,
 	file_destroy_backend,
 	{ 0, 0, NULL },
+	-1,
 };
 
 
