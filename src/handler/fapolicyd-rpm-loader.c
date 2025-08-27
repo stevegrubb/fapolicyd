@@ -45,8 +45,6 @@
 #include "backend-manager.h"
 #include "daemon-config.h"
 #include "message.h"
-#include "llist.h"
-#include "fd-fgets.h"
 #include "paths.h"
 
 atomic_bool stop = 0;  // Library needs this
@@ -55,13 +53,49 @@ unsigned int permissive = 0;			// Library needs this
 
 
 int do_rpm_init_backend(void);
-int do_rpm_load_list(conf_t * conf);
 int do_rpm_destroy_backend(void);
 
 extern backend rpm_backend;
 
 // fetch the socket FD number – defaults to 3 if env not set
 int sock_fd = 3; // same number dup2’ed by parent
+
+/*
+ * Estimate the initial size of the memfd from the existing trustdb.
+ * When the database is missing, default to 8 MiB.
+ */
+static size_t estimate_memfd_size(void)
+{
+	MDB_env *env;
+	MDB_txn *txn;
+	MDB_dbi dbi;
+	MDB_stat st;
+	size_t sz = 8 * 1024 * 1024;
+
+	if (mdb_env_create(&env))
+		return sz;
+
+	if (mdb_env_open(env, DB_DIR, MDB_RDONLY|MDB_NOLOCK, 0660)) {
+		mdb_env_close(env);
+		return sz;
+	}
+
+	if (mdb_txn_begin(env, NULL, MDB_RDONLY, &txn) == 0) {
+		if (mdb_dbi_open(txn, DB_NAME, 0, &dbi) == 0) {
+			if (mdb_stat(txn, dbi, &st) == 0) {
+				sz = (st.ms_leaf_pages +
+				      st.ms_overflow_pages) *
+				      st.ms_psize * 2;
+			}
+		}
+		mdb_txn_abort(txn);
+	}
+
+	mdb_env_close(env);
+	if (sz < 8 * 1024 * 1024)
+		sz = 8 * 1024 * 1024;
+	return sz;
+}
 
 int main(int argc, char * const argv[])
 {
@@ -78,15 +112,21 @@ int main(int argc, char * const argv[])
 		exit(1);
 	}
 
-	do_rpm_init_backend();
-	do_rpm_load_list(&config);
-
-	msg(LOG_INFO, "Loaded files %ld", rpm_backend.list.count);
-
-	list_item_t *item = list_get_first(&rpm_backend.list);
-	for (; item != NULL; item = item->next) {
-		dprintf(memfd, "%s %s\n", (const char*)item->index, (const char*)item->data);
+	if (ftruncate(memfd, estimate_memfd_size())) {
+		msg(LOG_ERR, "ftruncate failed");
+		exit(1);
 	}
+
+	do_rpm_init_backend();
+
+	/*
+	 * Entries are written in final DATA_FORMAT so the daemon can ingest
+	 * them with minimal processing.
+	 */
+	rpm_backend.load_fd(&config, memfd);
+
+	off_t used = lseek(memfd, 0, SEEK_CUR);
+	ftruncate(memfd, used);
 
 	fcntl(memfd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE);
 	lseek(memfd, 0, SEEK_SET);            /* rewind – not strictly needed */

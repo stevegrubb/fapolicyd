@@ -45,6 +45,7 @@
 #include <rpm/rpmpgp.h>
 #include <fnmatch.h>
 #include <sys/mman.h>
+#include <sys/uio.h>
 
 #include <uthash.h>
 
@@ -61,11 +62,11 @@
 extern atomic_bool stop;
 
 int do_rpm_init_backend(void);
-int do_rpm_load_list(const conf_t *);
 int do_rpm_destroy_backend(void);
 
 static int rpm_init_backend(void);
 static int rpm_load_list(const conf_t *);
+static int rpm_load_fd(const conf_t *, int fd);
 static int rpm_destroy_backend(void);
 
 backend rpm_backend =
@@ -73,7 +74,7 @@ backend rpm_backend =
 	"rpmdb",
 	rpm_init_backend,
 	rpm_load_list,
-	NULL,
+	rpm_load_fd,
 	rpm_destroy_backend,
 	/* list initialization */
 	{ 0, 0, NULL },
@@ -353,19 +354,20 @@ static int rpm_load_list(const conf_t *conf)
 	return 0;
 }
 
-// this function is used in fapolicyd-rpm-loader
+// this function streams trust entries in final DATA_FORMAT to @fd
 extern unsigned int debug_mode;
-int do_rpm_load_list(const conf_t *conf)
+static int rpm_load_fd(const conf_t *conf, int fd)
 {
-	int rc;
+	int rc, err = 0;
 	unsigned int msg_count = 0;
 	unsigned int tsource = SRC_RPM;
-
-	// empty list before loading
-	list_empty(&rpm_backend.list);
-
-	// hash table
 	struct _hash_record *hashtable = NULL;
+	unsigned long count = 0;
+	struct stat sb;
+	size_t used = 0, alloc = 0;
+
+	if (fstat(fd, &sb) == 0)
+		alloc = sb.st_size;
 
 	msg(LOG_INFO, "Loading rpmdb backend");
 	if ((rc = init_rpm())) {
@@ -396,7 +398,6 @@ int do_rpm_load_list(const conf_t *conf)
 			rpm_loff_t sz = get_file_size_rpm();
 			int len;
 			const char *sha = get_sha256_rpm(&len);
-			char *data;
 
 			if (file_name == NULL)
 				continue;
@@ -408,15 +409,12 @@ int do_rpm_load_list(const conf_t *conf)
 			}
 
 			// Note that some rpm builders have moved to
-			// SHA512. Originally this was to weed out SHA1.
+			// SHA512. Originally this was to weed out SHA1
 			// FIXME: This should be revisited to allow SHA512.
 			if (len != 64) {
 				// Limit this to 5 if production
-				if (debug_mode || msg_count++ < 5) {
-					msg(LOG_WARNING, "No SHA256 for %s",
-							    file_name);
-				}
-
+				if (debug_mode || msg_count++ < 5)
+					msg(LOG_WARNING, "No SHA256 for %s", file_name);
 				// skip the entry if there is no sha256
 				if (conf && conf->rpm_sha256_only) {
 					free((void *)file_name);
@@ -424,55 +422,68 @@ int do_rpm_load_list(const conf_t *conf)
 				}
 			}
 
-			// We use asprintf here because the linked list
-			// takes custody of the memory and frees it later.
-			if (asprintf(	&data,
-					DATA_FORMAT,
-					tsource,
-					sz,
-					sha) == -1) {
-				data = NULL;
+			char data[128];
+			int dlen = snprintf(data, sizeof(data), DATA_FORMAT,
+					    tsource, (unsigned long)sz, sha);
+			if (dlen <= 0 || dlen >= (int)sizeof(data)) {
+				free((void *)file_name);
+				continue;
 			}
 
-			if (data) {
-				// getting rid of the duplicates
-				struct _hash_record *rcd = NULL;
-				char key[4096];
-				snprintf(key, 4095, "%s %s", file_name, data);
+			// getting rid of the duplicates
+			struct _hash_record *rcd = NULL;
+			char key[4096];
+			snprintf(key, sizeof(key), "%s %s", file_name, data);
+			HASH_FIND_STR(hashtable, key, rcd);
 
-				HASH_FIND_STR( hashtable, key, rcd );
-
-				if (!rcd) {
-					rcd = (struct _hash_record*)
-					    malloc(sizeof(struct _hash_record));
-					rcd->key = strdup(key);
-					HASH_ADD_KEYPTR( hh, hashtable,
-							 rcd->key,
-							 strlen(rcd->key),
-							 rcd );
-					list_append(&rpm_backend.list,
-						    file_name, data);
-				} else {
-					free((void*)file_name);
-					free((void*)data);
+			if (!rcd) {
+				rcd = malloc(sizeof(*rcd));
+				rcd->key = strdup(key);
+				HASH_ADD_KEYPTR(hh, hashtable, rcd->key,
+					strlen(rcd->key), rcd);
+				struct iovec iov[4];
+				iov[0].iov_base = (char *)file_name;
+				iov[0].iov_len = strlen(file_name);
+				iov[1].iov_base = (char *)" ";
+				iov[1].iov_len = 1;
+				iov[2].iov_base = data;
+				iov[2].iov_len = dlen;
+				iov[3].iov_base = (char *)"\n";
+				iov[3].iov_len = 1;
+				size_t wlen = iov[0].iov_len + iov[1].iov_len +
+					iov[2].iov_len + iov[3].iov_len;
+				if (used + wlen >= alloc) {
+					alloc *= 2;
+					if (ftruncate(fd, alloc)) {
+						free((void *)file_name);
+						err = 1;
+						goto out;
+					}
 				}
-			} else {
-				free((void*)file_name);
+				if (writev(fd, iov, 4) != (ssize_t)wlen) {
+					free((void *)file_name);
+					err = 1;
+					goto out;
+				}
+				used += wlen;
+				count++;
 			}
+			free((void *)file_name);
 		}
 	}
 
+out:
 	close_rpm();
 
-	// cleaning up
 	struct _hash_record *item, *tmp;
-	HASH_ITER( hh, hashtable, item, tmp) {
-		HASH_DEL( hashtable, item );
-		free((void*)item->key);
-		free((void*)item);
+	HASH_ITER(hh, hashtable, item, tmp) {
+		HASH_DEL(hashtable, item);
+		free((void *)item->key);
+		free(item);
 	}
 
-	return 0;
+	msg(LOG_INFO, "Loaded files %lu", count);
+	return err;
 }
 
 static int rpm_init_backend(void)
