@@ -39,6 +39,7 @@
 #include <signal.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <limits.h>
 
 #include "database.h"
 #include "message.h"
@@ -55,6 +56,12 @@
 // Local defines
 enum { READ_DATA, READ_TEST_KEY, READ_DATA_DUP };
 typedef enum { DB_NO_OP, ONE_FILE, RELOAD_DB, FLUSH_CACHE, RELOAD_RULES } db_ops_t;
+/*
+ * BUFFER_SIZE is used for many thing sin theis file. However, it should be
+ * noted that is also reflects the maximum record size emitted by the backends.
+ * LMDB stores trust records in BUFFER_SIZE-byte chunks, so the memfd reader
+ * must honor the same limit when allocating per-line buffers.
+ */
 #define BUFFER_SIZE 4096
 #define MEGABYTE	(1024*1024)
 
@@ -77,6 +84,8 @@ static pthread_mutex_t rule_lock;
 // Local functions
 static void *update_thread_main(void *arg);
 static int update_database(conf_t *config);
+static int check_data_presence(const char *index, const char *data,
+		int *matched);
 
 // External variables
 extern atomic_bool stop;
@@ -634,24 +643,215 @@ static int delete_all_entries_db()
 }
 
 
+/*
+ * backend_memfd_foreach - iterate trust records stored in a backend snapshot.
+ * @be: backend entry that owns the memfd snapshot.
+ * @cb: callback executed for every parsed trust record.
+ * @arg: opaque pointer forwarded to the callback.
+ *
+ * Returns 0 when the snapshot is processed successfully. Returns 1 when the
+ * descriptor is missing, fails to read, or when @cb stops iteration by
+ * returning a non-zero value. The helper always closes the memfd descriptor
+ * before returning so that the backend releases its pages promptly.
+ */
+static int backend_memfd_foreach(backend_entry *be,
+		int (*cb)(const char *path, const char *data, void *arg),
+		void *arg)
+{
+	fd_fgets_state_t *state = NULL;
+	char *line = NULL;
+	char err_buff[BUFFER_SIZE];
+	int rc = 0;
+	int fd = be->backend->memfd;
+
+	if (fd < 0) {
+		msg(LOG_ERR, "%s backend did not supply a memfd snapshot",
+		    be->backend->name);
+		return 1;
+	}
+
+	if (lseek(fd, 0, SEEK_SET) < 0) {
+		msg(LOG_ERR,
+		    "Failed to rewind memfd for %s backend (%s)",
+		    be->backend->name,
+		    strerror_r(errno, err_buff, sizeof(err_buff)));
+		rc = 1;
+		goto cleanup;
+	}
+
+	state = fd_fgets_init();
+	if (state == NULL) {
+		msg(LOG_ERR, "Failed to allocate fd_fgets state for %s",
+		    be->backend->name);
+		rc = 1;
+		goto cleanup;
+	}
+
+	line = malloc(BUFFER_SIZE);
+	if (line == NULL) {
+		msg(LOG_ERR, "Failed to allocate memfd buffer for %s",
+		    be->backend->name);
+		rc = 1;
+		goto cleanup;
+	}
+
+	while (!stop) {
+		int len = fd_fgets_r(state, line, BUFFER_SIZE, fd);
+		if (len < 0) {
+			msg(LOG_ERR, "Error reading memfd from %s backend (%s)",
+			    be->backend->name,
+			    strerror_r(errno, err_buff, sizeof(err_buff)));
+			rc = 1;
+			break;
+		}
+
+		if (len == 0) {
+			// fd_fgets_r returns 0 when there is no complete line yet.
+			if (fd_fgets_eof_r(state))
+				break;
+
+			if (fd_fgets_more_r(state, BUFFER_SIZE))
+				continue;
+
+			msg(LOG_ERR,
+			    "Trust record from %s backend exceeds %d bytes",
+			    be->backend->name, BUFFER_SIZE);
+			rc = 1;
+			break;
+		}
+
+		if (line[len - 1] == '\n')
+			line[len - 1] = '\0';
+		else
+			line[len] = '\0';
+
+		char *data = strpbrk(line, " \t");
+		if (data == NULL) {
+			msg(LOG_DEBUG,
+			    "Skipping malformed trust entry from %s backend",
+			    be->backend->name);
+			continue;
+		}
+
+		*data++ = '\0';
+		data += strspn(data, " \t");
+		if (*data == '\0') {
+			msg(LOG_DEBUG,
+			    "Skipping trust entry from %s backend without metadata",
+			    be->backend->name);
+			continue;
+		}
+
+		// Give the caller a chance to handle the parsed trust record.
+		rc = cb(line, data, arg);
+		if (rc)
+			break;
+	}
+
+cleanup:
+	if (line)
+		free(line);
+	if (state)
+		fd_fgets_destroy(state);
+
+	if (fd >= 0) {
+		close(fd);
+		be->backend->memfd = -1;
+		be->backend->memfd_size = 0;
+	}
+
+	return rc;
+}
+
+struct backend_create_ctx {
+	int rc;
+};
+
+/*
+ * backend_write_record - persist a trust record into the LMDB database.
+ * @path: trusted file path obtained from the backend snapshot.
+ * @data: DATA_FORMAT metadata string associated with @path.
+ * @arg: pointer to backend_create_ctx used to track write failures.
+ *
+ * Returns 0 to continue iteration. Any write_db() failure is recorded in
+ * ctx->rc so that callers can report the last error encountered.
+ */
+static int backend_write_record(const char *path, const char *data, void *arg)
+{
+	struct backend_create_ctx *ctx = arg;
+	int rc = write_db(path, data);
+
+	if (rc) {
+		msg(LOG_ERR,
+		    "Error (%d) writing key=\"%s\" data=\"%s\"",
+		    rc, path, data);
+		ctx->rc = rc;
+	}
+
+	return 0;
+}
+
+struct backend_check_ctx {
+	long total_entries;
+	long added_entries;
+	long problems;
+};
+
+/*
+ * backend_verify_record - compare a backend record with the local database.
+ * @path: trusted file path obtained from the backend snapshot.
+ * @data: DATA_FORMAT metadata string associated with @path.
+ * @arg: pointer to backend_check_ctx that tracks statistics for the caller.
+ *
+ * Returns 0 to allow iteration to continue. The context accumulates mismatch
+ * counters so that check_database_copy() can report the same information that
+ * the list-based implementation produced.
+ */
+static int backend_verify_record(const char *path, const char *data, void *arg)
+{
+	struct backend_check_ctx *ctx = arg;
+	int matched = 0;
+	int found = check_data_presence(path, data, &matched);
+
+	ctx->total_entries++;
+
+	if (!found) {
+		ctx->problems++;
+
+		if (matched == 0) {
+			msg(LOG_DEBUG, "%s is not in the trust database",
+			    path);
+			ctx->added_entries++;
+		}
+
+		if (matched > 0)
+			msg(LOG_DEBUG, "Trust data miscompare for %s", path);
+	}
+
+	return 0;
+}
+
+
 static int create_database(int with_sync)
 {
 	msg(LOG_INFO, "Creating trust database");
 	int rc = 0;
 
-	for (backend_entry *be = backend_get_first() ; be != NULL && !stop ;
-							be = be->next ) {
-		msg(LOG_INFO,"Loading trust data from %s backend",
-							be->backend->name);
+	for (backend_entry *be = backend_get_first();
+			be != NULL && !stop;
+			be = be->next) {
+		msg(LOG_INFO, "Loading trust data from %s backend",
+		    be->backend->name);
 
-		list_item_t *item = list_get_first(&be->backend->list);
-		for (; item != NULL && !stop; item = item->next) {
-			if ((rc = write_db(item->index, item->data)))
-				msg(LOG_ERR,
-				    "Error (%d) writing key=\"%s\" data=\"%s\"",
-				    rc, (const char*)item->index,
-				    (const char*)item->data);
-		}
+		struct backend_create_ctx ctx = { .rc = 0 };
+		int iter_rc = backend_memfd_foreach(be, backend_write_record,
+						    &ctx);
+
+		// Preserve the last write_db() error to mimic prior behaviour.
+		if (ctx.rc)
+			rc = ctx.rc;
+		else if (iter_rc && rc == 0)
+			rc = iter_rc;
 	}
 	if (stop)
 		return 1;
@@ -718,6 +918,7 @@ static int check_database_copy(void)
 {
 	msg(LOG_INFO, "Checking if the trust database up to date");
 	long problems = 0;
+	int rc = 0;
 
 	if (start_long_term_read_ops())
 		return -1;
@@ -725,38 +926,23 @@ static int check_database_copy(void)
 	long backend_total_entries = 0;
 	long backend_added_entries = 0;
 
-	for (backend_entry *be = backend_get_first() ; be != NULL && !stop ;
-							be = be->next ) {
+	for (backend_entry *be = backend_get_first();
+			be != NULL && !stop;
+			be = be->next) {
 		msg(LOG_INFO, "Importing trust data from %s backend",
-							be->backend->name);
+		    be->backend->name);
 
-		backend_total_entries += be->backend->list.count;
-		list_item_t *item = list_get_first(&be->backend->list);
-		for (; item != NULL && !stop; item = item->next) {
+		// Track per-backend statistics while walking the snapshot.
+		struct backend_check_ctx ctx = { 0 };
+		int iter_rc = backend_memfd_foreach(be, backend_verify_record,
+						    &ctx);
 
-			int matched = 0;
-			int found = check_data_presence(item->index,
-							item->data,
-							&matched);
+		backend_total_entries += ctx.total_entries;
+		backend_added_entries += ctx.added_entries;
+		problems += ctx.problems;
 
-			if (!found) {
-				problems++;
-				// missing in db
-				// recently added file
-				if (matched == 0) {
-					msg(LOG_DEBUG, "%s is not in the trust database",
-					    (char*)item->index);
-					backend_added_entries++;
-				}
-
-				// updated file
-				// data miscompare
-				if (matched > 0) {
-					msg(LOG_DEBUG, "Trust data miscompare for %s",
-					    (char*)item->index);
-				}
-			}
-		}
+		if (iter_rc && rc == 0)
+			rc = iter_rc;
 	}
 
 	if (stop) {
@@ -765,6 +951,9 @@ static int check_database_copy(void)
 	}
 
 	end_long_term_read_ops();
+
+	if (rc)
+		return rc;
 
 	long db_total_entries = get_number_of_entries();
 	// something wrong
@@ -942,7 +1131,6 @@ int init_database(conf_t *config)
 		}
 	}
 
-	// Conserve memory by dumping the linked lists
 	backend_close();
 
 	pthread_create(&update_thread, NULL, update_thread_main, config);
