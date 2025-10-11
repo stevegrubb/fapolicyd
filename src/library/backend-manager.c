@@ -148,7 +148,12 @@ int backend_load(const conf_t *conf)
 {
 	for (backend_entry *be = backend_get_first();
 			be != NULL; be = be->next) {
-		if (be->backend->load(conf))
+		backend *b = be->backend;
+
+		if (b->load_fd && b->memfd >= 0) {
+			if (b->load_fd(conf, b->memfd))
+				return 1;
+		} else if (b->load && b->load(conf))
 			return 1;
 	}
 	return 0;

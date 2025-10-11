@@ -24,12 +24,14 @@ static int deb_load_list(const conf_t *);
 static int deb_destroy_backend(void);
 
 backend deb_backend = {
-    kDebBackend,
-    deb_init_backend,
-    deb_load_list,
-    deb_destroy_backend,
-    /* list initialization */
-    {0, 0, NULL},
+	kDebBackend,
+	deb_init_backend,
+	deb_load_list,
+	NULL,
+	deb_destroy_backend,
+	/* list initialization */
+	{0, 0, NULL},
+	-1,
 };
 
 // ================================================================
@@ -37,7 +39,7 @@ backend deb_backend = {
 // For some reason they segfault when i call :/
 
 int parse_filehash_buffer(struct varbuf *buf, struct pkginfo *pkg,
-                      struct pkgbin *pkgbin)
+			   struct pkgbin *pkgbin)
 {
   char *thisline, *nextline;
   const char *pkgname = pkg_name(pkg, pnaw_nonambig);
@@ -50,9 +52,9 @@ int parse_filehash_buffer(struct varbuf *buf, struct pkginfo *pkg,
     endline = memchr(thisline, '\n', buf_end - thisline);
     if (endline == NULL) {
       msg(LOG_ERR,
-          "control file '%s' for package '%s' is "
-          "missing final newline\n",
-          HASHFILE, pkgname);
+	   "control file '%s' for package '%s' is "
+	   "missing final newline\n",
+	   HASHFILE, pkgname);
       return 1;
     }
 
@@ -62,17 +64,17 @@ int parse_filehash_buffer(struct varbuf *buf, struct pkginfo *pkg,
     filename = hash_end + 2;
     if (filename + 1 > endline) {
       msg(LOG_ERR,
-          "control file '%s' for package '%s' is "
-          "missing value\n",
-          HASHFILE, pkgname);
+	   "control file '%s' for package '%s' is "
+	   "missing value\n",
+	   HASHFILE, pkgname);
       return 1;
     }
 
     if (hash_end[0] != ' ' || hash_end[1] != ' ') {
       msg(LOG_ERR,
-          "control file '%s' for package '%s' is "
-          "missing value separator\n",
-          HASHFILE, pkgname);
+	   "control file '%s' for package '%s' is "
+	   "missing value separator\n",
+	   HASHFILE, pkgname);
       return 1;
     }
     hash_end[0] = '\0';
@@ -85,9 +87,9 @@ int parse_filehash_buffer(struct varbuf *buf, struct pkginfo *pkg,
 
     if (endline == thisline) {
       msg(LOG_ERR,
-          "control file '%s' for package '%s' "
-          "contains empty filename\n",
-          HASHFILE, pkgname);
+	   "control file '%s' for package '%s' "
+	   "contains empty filename\n",
+	   HASHFILE, pkgname);
       return 1;
     }
 
@@ -108,7 +110,7 @@ void parse_filehash2(struct pkginfo *pkg, struct pkgbin *pkgbin)
 
   if (file_slurp(hashfile, &buf, &err) < 0 && err.syserrno != ENOENT)
     msg(LOG_ERR, "loading control file '%s' for package '%s'", HASHFILE,
-        pkg_name(pkg, pnaw_nonambig));
+	 pkg_name(pkg, pnaw_nonambig));
 
   if (buf.used > 0) parse_filehash_buffer(&buf, pkg, pkgbin);
 
@@ -138,7 +140,7 @@ static int deb_load_list(const conf_t *conf)
       continue;
     }
     printf("\x1b[2K\rPackage %d / %d : %s", i + 1, array.n_pkgs,
-           package->set->name);
+	    package->set->name);
     if (pkg_infodb_has_file(package, &package->installed, control_file))
       pkg_infodb_get_file(package, &package->installed, control_file);
     ensure_packagefiles_available(package);
@@ -160,12 +162,12 @@ static int deb_load_list(const conf_t *conf)
       struct fsys_namenode *namenode = file->namenode;
       // Get the hash and path of the file.
       const char *hash =
-          (namenode->newhash == NULL) ? namenode->oldhash : namenode->newhash;
+	   (namenode->newhash == NULL) ? namenode->oldhash : namenode->newhash;
       const char *path = (namenode->divert && !namenode->divert->camefrom)
-                             ? namenode->divert->useinstead->name
-                             : namenode->name;
+			      ? namenode->divert->useinstead->name
+			      : namenode->name;
       if (hash != NULL) {
-        add_file_to_backend_by_md5(path, hash, hashtable_ptr, SRC_DEB,
+	 add_file_to_backend_by_md5(path, hash, hashtable_ptr, SRC_DEB,
 				   &deb_backend);
       }
       file = file->next;

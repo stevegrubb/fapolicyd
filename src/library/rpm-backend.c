@@ -73,9 +73,11 @@ backend rpm_backend =
 	"rpmdb",
 	rpm_init_backend,
 	rpm_load_list,
+	NULL,
 	rpm_destroy_backend,
 	/* list initialization */
 	{ 0, 0, NULL },
+	-1,
 };
 
 static rpmts ts = NULL;
@@ -245,7 +247,7 @@ static int rpm_load_list(const conf_t *conf)
 			char buf[CMSG_SPACE(sizeof(int))];
 		} cmsgbuf;
 
-		_msg.msg_iov    = &iov;
+		_msg.msg_iov	= &iov;
 		_msg.msg_iovlen = 1;
 		_msg.msg_control = cmsgbuf.buf;
 		_msg.msg_controllen = sizeof cmsgbuf.buf;
