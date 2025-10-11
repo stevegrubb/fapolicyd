@@ -25,6 +25,8 @@
 #ifndef FAPOLICYD_BACKEND_HEADER
 #define FAPOLICYD_BACKEND_HEADER
 
+#include <sys/types.h>
+
 #include "conf.h"
 #include "llist.h"
 
@@ -49,6 +51,7 @@ typedef struct _backend
 	int (*close)(void);
 	list_t list;
 	int memfd;
+	off_t memfd_size;
 } backend;
 
 #endif

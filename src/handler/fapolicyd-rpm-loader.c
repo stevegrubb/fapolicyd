@@ -45,8 +45,6 @@
 #include "backend-manager.h"
 #include "daemon-config.h"
 #include "message.h"
-#include "llist.h"
-#include "fd-fgets.h"
 #include "paths.h"
 
 atomic_bool stop = 0;  // Library needs this
@@ -55,10 +53,8 @@ conf_t config;				// Library needs this
 
 
 int do_rpm_init_backend(void);
-int do_rpm_load_list(conf_t * conf);
+int do_rpm_load_list(const conf_t *conf, int memfd);
 int do_rpm_destroy_backend(void);
-
-extern backend rpm_backend;
 
 // fetch the socket FD number – defaults to 3 if env not set
 int sock_fd = 3; // same number dup2’ed by parent
@@ -77,13 +73,43 @@ int main(int argc, char * const argv[])
 	}
 
 	do_rpm_init_backend();
-	do_rpm_load_list(&config);
 
-	msg(LOG_INFO, "Loaded files %ld", rpm_backend.list.count);
+	// Estimate the snapshot size from the existing trust database
+	// so we grow less often.
+	char trustdb_path[PATH_MAX];
+	snprintf(trustdb_path, sizeof(trustdb_path), "%s/%s", DB_DIR, DB_NAME);
 
-	list_item_t *item = list_get_first(&rpm_backend.list);
-	for (; item != NULL; item = item->next) {
-		dprintf(memfd, "%s %s\n", (const char*)item->index, (const char*)item->data);
+	struct stat trust_stat;
+	off_t initial_size = 8 * 1024 * 1024;    // default to an 8 MiB buffer
+	if (stat(trustdb_path, &trust_stat) == 0 && trust_stat.st_size > 0) {
+		off_t candidate = trust_stat.st_size / 2;
+		if (candidate > 0)
+			initial_size = candidate;
+	}
+
+	if (ftruncate(memfd, initial_size) < 0)
+		msg(LOG_DEBUG, "Unable to preallocate %lld bytes: %s",
+			(long long)initial_size, strerror(errno));
+
+	if (lseek(memfd, 0, SEEK_SET) < 0) {
+		msg(LOG_ERR, "lseek failed on memfd: %s", strerror(errno));
+		exit(1);
+	}
+
+	if (do_rpm_load_list(&config, memfd)) {
+		msg(LOG_ERR, "Failed to load rpm trust snapshot");
+		exit(1);
+	}
+
+	off_t used = lseek(memfd, 0, SEEK_CUR);
+	if (used >= 0) {
+		if (ftruncate(memfd, used) < 0)
+			msg(LOG_WARNING,
+			    "Unable to shrink memfd to %lld bytes: %s",
+			    (long long)used, strerror(errno));
+	} else {
+		msg(LOG_WARNING, "Unable to determine snapshot size: %s",
+		    strerror(errno));
 	}
 
 	fcntl(memfd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE);

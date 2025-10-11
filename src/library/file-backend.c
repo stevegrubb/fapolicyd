@@ -48,6 +48,7 @@ backend file_backend =
 	file_destroy_backend,
 	{ 0, 0, NULL },
 	-1,
+	0,
 };
 
 

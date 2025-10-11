@@ -24,11 +24,13 @@
 
 #include "config.h"
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdatomic.h>
 #include <stddef.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/syslog.h>
 #include <sys/syslog.h>
 #include <sys/types.h>
@@ -44,15 +46,12 @@
 #include <rpm/rpmdb.h>
 #include <rpm/rpmpgp.h>
 #include <fnmatch.h>
-#include <sys/mman.h>
 
 #include <uthash.h>
 
 #include "message.h"
 #include "gcc-attributes.h"
-#include "fd-fgets.h"
 #include "fapolicyd-backend.h"
-#include "llist.h"
 
 #include "filter.h"
 #include "file.h"
@@ -61,23 +60,24 @@
 extern atomic_bool stop;
 
 int do_rpm_init_backend(void);
-int do_rpm_load_list(const conf_t *);
+int do_rpm_load_list(const conf_t *, int memfd);
 int do_rpm_destroy_backend(void);
 
 static int rpm_init_backend(void);
-static int rpm_load_list(const conf_t *);
+static int rpm_load_memfd(const conf_t *);
 static int rpm_destroy_backend(void);
 
 backend rpm_backend =
 {
 	"rpmdb",
 	rpm_init_backend,
-	rpm_load_list,
+	rpm_load_memfd,
 	NULL,
 	rpm_destroy_backend,
 	/* list initialization */
 	{ 0, 0, NULL },
 	-1,
+	0,
 };
 
 static rpmts ts = NULL;
@@ -209,10 +209,75 @@ struct _hash_record {
 	UT_hash_handle hh;
 };
 
-#define BUFFER_SIZE 4096
 #define MAX_DELIMS 3
-static int rpm_load_list(const conf_t *conf)
+
+/*
+ * write_memfd_record - stream one trust record into the memfd snapshot.
+ * @fd: destination file descriptor obtained from memfd_create.
+ * @path: rpm file path that should be trusted.
+ * @data: formatted metadata string (source, size, sha).
+ *
+ * Returns 0 when the full record is written or -1 if a write error occurs.
+ */
+static int write_memfd_record(int fd, const char *path, const char *data)
 {
+	struct iovec iov[4];
+	char space = ' ';
+	char newline = '\n';
+
+	iov[0].iov_base = (void *)path;
+	iov[0].iov_len = strlen(path);
+	iov[1].iov_base = &space;
+	iov[1].iov_len = 1;
+	iov[2].iov_base = (void *)data;
+	iov[2].iov_len = strlen(data);
+	iov[3].iov_base = &newline;
+	iov[3].iov_len = 1;
+
+	size_t total = 0;
+	for (size_t i = 0; i < 4; ++i)
+		total += iov[i].iov_len;
+
+	size_t written = 0;
+	int idx = 0;
+	while (written < total) {
+		ssize_t rc = writev(fd, &iov[idx], 4 - idx);
+		if (rc < 0) {
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+
+		written += rc;
+		ssize_t remain = rc;
+		while (idx < 4 && remain >= (ssize_t)iov[idx].iov_len) {
+			remain -= iov[idx].iov_len;
+			idx++;
+		}
+		if (idx < 4 && remain > 0) {
+			iov[idx].iov_base = (char *)iov[idx].iov_base + remain;
+			iov[idx].iov_len -= remain;
+		}
+	}
+
+	return 0;
+}
+
+/*
+ * rpm_load_memfd - request a sealed memfd snapshot from the loader helper.
+ * @conf: active configuration (currently unused but kept for interface parity)
+ *
+ * Returns 0 on success or 1 if the helper could not be contacted.
+ */
+static int rpm_load_memfd(const conf_t *conf)
+{
+	(void)conf;
+
+	if (rpm_backend.memfd >= 0) {
+		close(rpm_backend.memfd);
+		rpm_backend.memfd = -1;
+	}
+	rpm_backend.memfd_size = 0;
 
 	// before the spawn
 	int sv[2];
@@ -234,7 +299,7 @@ static int rpm_load_list(const conf_t *conf)
 
 	pid_t pid = -1;
 	int status = posix_spawn(&pid, "/usr/bin/fapolicyd-rpm-loader",
-					 &actions, NULL, argv, custom_env);
+				 &actions, NULL, argv, custom_env);
 	close(sv[1]);  // Parent doesn't write
 
 	if (status == 0) {
@@ -247,7 +312,7 @@ static int rpm_load_list(const conf_t *conf)
 			char buf[CMSG_SPACE(sizeof(int))];
 		} cmsgbuf;
 
-		_msg.msg_iov	= &iov;
+		_msg.msg_iov    = &iov;
 		_msg.msg_iovlen = 1;
 		_msg.msg_control = cmsgbuf.buf;
 		_msg.msg_controllen = sizeof cmsgbuf.buf;
@@ -267,92 +332,43 @@ static int rpm_load_list(const conf_t *conf)
 		int memfd;
 		memcpy(&memfd, CMSG_DATA(c), sizeof memfd);
 
-		char buff[BUFFER_SIZE];
-		fd_fgets_state_t *st = fd_fgets_init();
-
-		// On any failure, fall back to descriptor based reads
 		struct stat sb;
-		if (fstat(memfd, &sb) == 0) {
-			void *base = mmap(NULL, sb.st_size, PROT_READ,
-					  MAP_PRIVATE, memfd, 0);
-
-			if (base != MAP_FAILED)
-				fd_setvbuf_r(st,base,sb.st_size,MEM_MMAP_FILE);
+		if (fstat(memfd, &sb) == 0)
+			// Record the byte count for callers that want to
+			// mmap the snapshot.
+			rpm_backend.memfd_size = sb.st_size;
+		else {
+			msg(LOG_DEBUG, "fstat failed on rpm snapshot: %s",
+			    strerror(errno));
+			rpm_backend.memfd_size = 0;
 		}
 
-		do {
-			int res = fd_fgets_r(st, buff, sizeof(buff), memfd);
-			if (res == -1) {
-				msg(LOG_ERR, "fd_fgets_r on memfd");
-				break;
-			} else if (res > 0) {
-				char *end  = strchr(buff, '\n');
-
-				if (end == NULL) {
-					msg(LOG_ERR, "Too long line?");
-					continue;
-				}
-
-				int size = end - buff;
-				*end = '\0';
-
-				// its better to parse it from the end because
-				// there can be space in file name
-				int delims = 0;
-				char *delim = NULL;
-				for (int i = size-1 ; i >= 0 ; i--) {
-					if (isspace(buff[i])) {
-						delim = &buff[i];
-						delims++;
-					}
-					if (delims >= MAX_DELIMS) {
-						buff[i] = '\0';
-						break;
-					}
-				}
-
-				char *index = strdup(buff);
-				char *data = strdup(delim + 1);
-				if (!index || !data) {
-					free(index);
-					free(data);
-					continue;
-				}
-
-				if (list_append(&rpm_backend.list, index, data)) {
-					free(index);
-					free(data);
-				}
-			}
-		} while(!fd_fgets_eof_r(st));
-
-		fd_fgets_destroy(st); // calls munmap
-		close(memfd);
+		// Store the sealed memfd for the daemon to consume later.
+		rpm_backend.memfd = memfd;
 		waitpid(pid, NULL, 0);
 	} else {
+		close(sv[0]);
 		msg(LOG_ERR, "posix_spawn failed: %s\n", strerror(status));
 	}
 
 	posix_spawn_file_actions_destroy(&actions);
 
-	if (rpm_backend.list.count == 0) {
-		msg(LOG_DEBUG, "Recieved 0 files from rpmdb loader");
+	if (rpm_backend.memfd < 0)
 		return 1;
-	}
 
 	return 0;
 }
 
+
+
 // this function is used in fapolicyd-rpm-loader
 extern unsigned int debug_mode;
-int do_rpm_load_list(const conf_t *conf)
+int do_rpm_load_list(const conf_t *conf, int memfd)
 {
 	int rc;
 	unsigned int msg_count = 0;
 	unsigned int tsource = SRC_RPM;
-
-	// empty list before loading
-	list_empty(&rpm_backend.list);
+	int ret = 0;
 
 	// hash table
 	struct _hash_record *hashtable = NULL;
@@ -361,6 +377,13 @@ int do_rpm_load_list(const conf_t *conf)
 	if ((rc = init_rpm())) {
 		msg(LOG_ERR, "init_rpm() failed (%d)", rc);
 		return rc;
+	}
+
+	// Reset the snapshot offset before we start streaming records.
+	if (lseek(memfd, 0, SEEK_SET) < 0) {
+		msg(LOG_ERR, "lseek failed on memfd: %s", strerror(errno));
+		ret = 1;
+		goto cleanup;
 	}
 
 	// Loop across the rpm database
@@ -390,8 +413,10 @@ int do_rpm_load_list(const conf_t *conf)
 			filter_rc_t f_res = filter_check(file_name);
 			if (f_res != FILTER_ALLOW) {
 				free((void *)file_name);
-				if (f_res == FILTER_ERR_DEPTH)
-					return FILTER_ERR_DEPTH;
+				if (f_res == FILTER_ERR_DEPTH) {
+					ret = FILTER_ERR_DEPTH;
+					goto cleanup;
+				}
 				continue;
 			}
 
@@ -400,14 +425,14 @@ int do_rpm_load_list(const conf_t *conf)
 			const char *sha = get_sha256_rpm(&len);
 			char *data;
 
-			// Note that some rpm builders have moved to
-			// SHA512. Originally this was to weed out SHA1.
+			// Note that some rpm builders have moved to SHA512.
+			// Originally this was to weed out SHA1.
 			// FIXME: This should be revisited to allow SHA512.
 			if (len != 64) {
 				// Limit this to 5 if production
 				if (debug_mode || msg_count++ < 5) {
 					msg(LOG_WARNING, "No SHA256 for %s",
-							    file_name);
+					    file_name);
 				}
 
 				// skip the entry if there is no sha256
@@ -419,11 +444,10 @@ int do_rpm_load_list(const conf_t *conf)
 
 			// We use asprintf here because the linked list
 			// takes custody of the memory and frees it later.
-			if (asprintf(	&data,
-					DATA_FORMAT,
-					tsource,
-					sz,
-					sha) == -1) {
+			// The streaming path mirrors that behaviour by
+			// freeing the buffers after writev completes.
+			if (asprintf(&data,
+				     DATA_FORMAT, tsource, sz, sha) == -1) {
 				data = NULL;
 			}
 
@@ -433,47 +457,77 @@ int do_rpm_load_list(const conf_t *conf)
 				char key[4096];
 				snprintf(key, 4095, "%s %s", file_name, data);
 
-				HASH_FIND_STR( hashtable, key, rcd );
+				HASH_FIND_STR(hashtable, key, rcd);
 
 				if (!rcd) {
 					rcd = (struct _hash_record*)
 					    malloc(sizeof(struct _hash_record));
+					if (!rcd) {
+						msg(LOG_ERR,
+						    "Out of memory adding rpm record");
+						free((void *)file_name);
+						free((void *)data);
+						ret = 1;
+						goto cleanup;
+					}
 					rcd->key = strdup(key);
-					HASH_ADD_KEYPTR( hh, hashtable,
-							 rcd->key,
-							 strlen(rcd->key),
-							 rcd );
-					if (list_append(&rpm_backend.list,
-							file_name, data)) {
-						free((void*)file_name);
-						free((void*)data);
+					if (!rcd->key) {
+						free(rcd);
+						free((void *)file_name);
+						free((void *)data);
+						ret = 1;
+						goto cleanup;
+					}
+					HASH_ADD_KEYPTR(hh, hashtable,
+							rcd->key,
+							strlen(rcd->key), rcd);
+
+					// Stream the deduplicated record
+					// directly into the snapshot.
+					if (write_memfd_record(memfd,
+							       file_name,
+							       data)) {
+						msg(LOG_ERR,"writev failed: %s",
+						    strerror(errno));
+						free((void *)file_name);
+						free((void *)data);
+						ret = 1;
+						goto cleanup;
 					}
 				} else {
-					free((void*)file_name);
-					free((void*)data);
+					free((void *)file_name);
+					free((void *)data);
+					continue;
 				}
+
+				free((void *)file_name);
+				free((void *)data);
 			} else {
-				free((void*)file_name);
+				free((void *)file_name);
 			}
 		}
 	}
 
+cleanup:
 	close_rpm();
 
 	// cleaning up
 	struct _hash_record *item, *tmp;
-	HASH_ITER( hh, hashtable, item, tmp) {
-		HASH_DEL( hashtable, item );
+	HASH_ITER(hh, hashtable, item, tmp) {
+		HASH_DEL(hashtable, item);
 		free((void*)item->key);
 		free((void*)item);
 	}
 
-	return 0;
+	return ret;
 }
+
 
 static int rpm_init_backend(void)
 {
-	list_init(&rpm_backend.list);
+	// ensure we start with a closed snapshot descriptor
+	rpm_backend.memfd = -1;
+	rpm_backend.memfd_size = 0;
 
 	return 0;
 }
@@ -490,21 +544,30 @@ int do_rpm_init_backend(void)
 		return 1;
 	}
 
-	list_init(&rpm_backend.list);
+	rpm_backend.memfd = -1;
+	rpm_backend.memfd_size = 0;
 
 	return 0;
 }
 
 static int rpm_destroy_backend(void)
 {
-	list_empty(&rpm_backend.list);
+	if (rpm_backend.memfd >= 0) {
+		close(rpm_backend.memfd);
+		rpm_backend.memfd = -1;
+	}
+	rpm_backend.memfd_size = 0;
 	return 0;
 }
 
 // this function is used in fapolicyd-rpm-loader
 int do_rpm_destroy_backend(void)
 {
-	list_empty(&rpm_backend.list);
+	if (rpm_backend.memfd >= 0) {
+		close(rpm_backend.memfd);
+		rpm_backend.memfd = -1;
+	}
+	rpm_backend.memfd_size = 0;
 	filter_destroy();
 	return 0;
 }
