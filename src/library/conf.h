@@ -38,6 +38,7 @@ typedef struct conf
 	unsigned int do_stat_report;
 	unsigned int detailed_report;
 	unsigned int db_max_size;
+	unsigned int db_max_size_is_auto;
 	unsigned int subj_cache_size;
 	unsigned int obj_cache_size;
 	const char *watch_fs;
@@ -47,7 +48,7 @@ typedef struct conf
 	const char *syslog_format;
 	unsigned int rpm_sha256_only;
 	unsigned int allow_filesystem_mark;
-    unsigned int report_interval;
+	unsigned int report_interval;
 } conf_t;
 
 #endif

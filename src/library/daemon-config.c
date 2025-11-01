@@ -33,6 +33,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <ctype.h>
@@ -135,6 +136,7 @@ static void clear_daemon_config(conf_t *config)
 	config->do_stat_report = 1;
 	config->detailed_report = 1;
 	config->db_max_size = 100;
+	config->db_max_size_is_auto = 0;
 	config->subj_cache_size = 4099;
 	config->obj_cache_size = 8191;
 	config->watch_fs = strdup("ext4,xfs,tmpfs");
@@ -149,7 +151,7 @@ static void clear_daemon_config(conf_t *config)
 		strdup("rule,dec,perm,auid,pid,exe,:,path,ftype");
 	config->rpm_sha256_only = 0;
 	config->allow_filesystem_mark = 0;
-    config->report_interval = 0;
+	config->report_interval = 0;
 }
 
 int load_daemon_config(conf_t *config)
@@ -494,7 +496,21 @@ static int detailed_report_parser(const struct nv_pair *nv, int line,
 static int db_max_size_parser(const struct nv_pair *nv, int line,
 		conf_t *config)
 {
-	return unsigned_int_parser(&(config->db_max_size), nv->value, line);
+	if (strcasecmp(nv->value, "auto") == 0) {
+		config->db_max_size_is_auto = 1;
+		config->db_max_size = 0;
+		return 0;
+	}
+
+	unsigned int value = 0;
+	int rc = unsigned_int_parser(&value, nv->value, line);
+	if (rc)
+		return rc;
+
+	config->db_max_size_is_auto = 0;
+	config->db_max_size = value;
+
+	return 0;
 }
 
 static int subj_cache_size_parser(const struct nv_pair *nv, int line,
