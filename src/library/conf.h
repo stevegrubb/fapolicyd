@@ -50,6 +50,7 @@ typedef struct conf
 	unsigned int rpm_sha256_only;
 	unsigned int allow_filesystem_mark;
 	unsigned int report_interval;
+	unsigned int keep_type_stats;
 } conf_t;
 
 #endif

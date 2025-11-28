@@ -66,6 +66,8 @@ void reply_event(int fd, const struct fanotify_event_metadata *metadata,
 		unsigned reply, event_t *e);
 void make_policy_decision(const struct fanotify_event_metadata *metadata,
 						int fd, uint64_t mask);
+void policy_enable_type_stats(unsigned int enable);
+void policy_dump_type_stats(void);
 unsigned long getAllowed(void);
 unsigned long getDenied(void);
 void policy_no_audit(void);

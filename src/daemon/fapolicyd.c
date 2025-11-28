@@ -377,6 +377,8 @@ static int reload_configuration(void)
 		return 1;
 	}
 
+	new_config.keep_type_stats = config.keep_type_stats;
+
 	config.permissive = new_config.permissive;
 
 	if (setpriority(PRIO_PROCESS, 0, -(int)new_config.nice_val) == -1)
@@ -411,6 +413,7 @@ static int reload_configuration(void)
 		}
 
 	config.rpm_sha256_only = new_config.rpm_sha256_only;
+	config.keep_type_stats = new_config.keep_type_stats;
 
 	if (new_config.trust && (!config.trust ||
 				strcmp(new_config.trust, config.trust) != 0)) {
@@ -733,7 +736,7 @@ static void usage(void)
 {
 	fprintf(stderr,
 		"Usage: fapolicyd [--debug|--debug-deny] [--permissive] "
-		"[--no-details] [--version]\n");
+		"[--no-details] [--keep-type-stats] [--version]\n");
 	exit(1);
 }
 
@@ -791,6 +794,9 @@ void do_stat_report(FILE *f, int shutdown)
 
 	if (shutdown)
 		fputs("\n", f);
+
+	// out put either on demand or at shutdown
+	policy_dump_type_stats();
 }
 
 int already_running(void)
@@ -934,6 +940,8 @@ int main(int argc, const char *argv[])
 			}
 			msg(LOG_INFO, "Overriding mounts file: %s", tmp);
 			mounts = tmp;
+		} else if (strcmp(argv[i], "--keep-type-stats") == 0) {
+			config.keep_type_stats = 1;
 		} else if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "--debug-deny") == 0) {
 			// nop; debug flags already set
 		} else {
@@ -942,6 +950,8 @@ int main(int argc, const char *argv[])
 			usage();
 		}
 	}
+
+	policy_enable_type_stats(config.keep_type_stats);
 
 	if (already_running()) {
 		msg(LOG_ERR, "fapolicyd is already running");

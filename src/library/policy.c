@@ -36,7 +36,9 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdatomic.h>
+#include <sys/stat.h>
 
+#include "avl.h"
 #include "database.h"
 #include "escape.h"
 #include "file.h"
@@ -58,6 +60,8 @@ static atomic_ulong allowed = 0, denied = 0;
 static nvlist_t fields[MAX_SYSLOG_FIELDS];
 static unsigned int num_fields;
 static unsigned int syslog_proc_status_mask;
+static avl_tree_t type_stats;
+static bool keep_type_stats = false;
 
 extern atomic_bool stop;
 atomic_bool reload_rules = false;
@@ -76,6 +80,13 @@ static const nv_t table[] = {
 {       DENY_LOG, "deny_log" }
 };
 
+struct type_stat
+{
+	avl_t avl;
+	char *mime;
+	unsigned long accesses;
+};
+
 extern unsigned int debug_mode;
 extern conf_t config;
 
@@ -86,6 +97,131 @@ extern conf_t config;
 #define F_DECISION 31
 #define F_PERM 32
 #define F_COLON 33
+
+/*
+ * type_stat_cmp - compare two MIME stats by name.
+ * @a: first tree entry.
+ * @b: second tree entry.
+ * Returns: strcmp-style ordering.
+ */
+static int type_stat_cmp(void *a, void *b)
+{
+	return strcmp(((struct type_stat *)a)->mime,
+		      ((struct type_stat *)b)->mime);
+}
+
+/*
+ * free_type_stat - release a MIME stat node.
+ * @s: node being destroyed.
+ * Returns nothing.
+ */
+static void free_type_stat(struct type_stat *s)
+{
+	free(s->mime);
+	free(s);
+}
+
+/*
+ * add_type_stat - insert or update MIME access counts.
+ * @mime: MIME string to track.
+ * Returns nothing.
+ */
+static void add_type_stat(const char *mime)
+{
+	struct type_stat key, *node;
+
+	key.mime = (char *)mime;
+	node = (struct type_stat *)avl_search(&type_stats, (avl_t *)&key);
+	if (node) {
+		node->accesses++;
+		return;
+	}
+
+	node = malloc(sizeof(struct type_stat));
+	if (node == NULL)
+		return;
+
+	node->mime = strdup(mime);
+	if (node->mime == NULL) {
+		free(node);
+		return;
+	}
+	node->accesses = 1;
+
+	if (avl_insert(&type_stats, (avl_t *)node) != (avl_t *)node)
+		free_type_stat(node);
+}
+
+/*
+ * record_type_stat - gather MIME type for current event.
+ * @e: event currently being processed.
+ * Returns nothing.
+ */
+static void record_type_stat(event_t *e)
+{
+	object_attr_t *ftype;
+
+	if (!keep_type_stats)
+		return;
+
+	ftype = get_obj_attr(e, FTYPE);
+	if (ftype == NULL || ftype->o == NULL)
+		return;
+
+	add_type_stat(ftype->o);
+}
+
+/*
+ * build_type_stat_index - flatten AVL tree into a sortable array.
+ * @count: filled with number of entries.
+ * Returns: allocated array on success, NULL otherwise.
+ */
+static struct type_stat **build_type_stat_index(size_t *count)
+{
+	avl_iterator i;
+	struct type_stat *node;
+	struct type_stat **list = NULL;
+	size_t cap = 0;
+
+	*count = 0;
+	node = (struct type_stat *)avl_first(&i, &type_stats);
+	while (node) {
+		if (*count == cap) {
+			size_t new_cap = cap ? cap << 1 : 16;
+			struct type_stat **tmp = realloc(list,
+					sizeof(struct type_stat *) * new_cap);
+			if (tmp == NULL) {
+				free(list);
+				return NULL;
+			}
+			list = tmp;
+			cap = new_cap;
+		}
+		list[*count] = node;
+		(*count)++;
+		node = (struct type_stat *)avl_next(&i);
+	}
+
+	return list;
+}
+
+/*
+ * type_stat_sort - sort helper for descending access count.
+ * @a: left element.
+ * @b: right element.
+ * Returns: strcmp-style ordering.
+ */
+static int type_stat_sort(const void *a, const void *b)
+{
+	const struct type_stat * const *la = a;
+	const struct type_stat * const *lb = b;
+
+	if ((*la)->accesses < (*lb)->accesses)
+		return 1;
+	if ((*la)->accesses > (*lb)->accesses)
+		return -1;
+	return strcmp((*la)->mime, (*lb)->mime);
+}
 
 #ifdef FAN_AUDIT_RULE_NUM
 struct fan_audit_response
@@ -101,8 +237,60 @@ static char *working_buffer = NULL;
 // This function returns 1 on success and 0 on failure
 static int parsing_obj;
 static void *fmemccpy(void* restrict dst, const void* restrict src, ssize_t n)
-	__attr_access((__write_only__, 1, 3))
+	 __attr_access((__write_only__, 1, 3))
 	__attr_access((__read_only__, 2, 3));
+
+/*
+ * policy_enable_type_stats - initialize MIME tracking.
+ * @enable: non-zero to collect MIME statistics.
+ * Returns nothing.
+ */
+void policy_enable_type_stats(unsigned int enable)
+{
+	keep_type_stats = enable ? true : false;
+	if (keep_type_stats)
+		avl_init(&type_stats, type_stat_cmp);
+}
+
+/*
+ * policy_dump_type_stats - write MIME stats to disk and free storage.
+ * Returns nothing.
+ */
+void policy_dump_type_stats(void)
+{
+	FILE *f;
+	size_t count = 0, i;
+	struct type_stat **list;
+
+	if (!keep_type_stats)
+		goto out;
+
+	list = build_type_stat_index(&count);
+	if (list && count) {
+		qsort(list, count, sizeof(*list), type_stat_sort);
+		f = fopen(TYPE_STATS, "w");
+		if (f == NULL) {
+			msg(LOG_WARNING, "Cannot write %s (%s)", TYPE_STATS,
+				strerror(errno));
+		} else {
+			for (i = 0; i < count; i++)
+				fprintf(f, "%s %lu\n", list[i]->mime,
+					list[i]->accesses);
+			fclose(f);
+		}
+		free(list);
+	} else
+		free(list);
+
+out:
+	while (type_stats.root) {
+		struct type_stat *ts = (struct type_stat *)
+				avl_remove(&type_stats, type_stats.root);
+		if (ts)
+			free_type_stat(ts);
+	}
+}
+
 static int lookup_field(const char *ptr)
 {
 	if (strcmp("rule", ptr) == 0) {
@@ -576,6 +764,8 @@ decision_t process_event(event_t *e)
 	// Record which rule (rules are 1 based when listed by the cli tool)
 	if (r)
 		e->num = r->num + 1;
+
+	record_type_stat(e);
 
 	// If we are not in permissive mode, return any decision
 	if (results != NO_OPINION)
