@@ -556,6 +556,17 @@ void handle_events(void)
 
 						failure_action_record(
 						    FAILURE_REASON_QUEUE_FULL);
+						if (decision_config_permissive(NULL))
+							decision = FAN_ALLOW;
+						/*
+						 * Answer before syslog:
+						 * journald may be the blocked
+						 * opener, and logging first
+						 * can create a circular wait
+						 * during journal rotation.
+						 */
+						reply_event(fd, metadata,
+							    decision, NULL);
 						msg(LOG_ERR,
 						    "Failed to enqueue event "
 						    "for PID %d to worker %u: "
@@ -563,10 +574,6 @@ void handle_events(void)
 						    "consider tuning q_size if "
 						    "issue happens often",
 						    metadata->pid, worker_index);
-						if (decision_config_permissive(NULL))
-							decision = FAN_ALLOW;
-						reply_event(fd, metadata,
-							    decision, NULL);
 					}
 				}
 			} else {
