@@ -18,6 +18,7 @@
 #include "file-cli.h"
 #include "message.h"
 #include "paths.h"
+#include "policy.h"
 #include "rules.h"
 #include "rule-lint.h"
 
@@ -304,6 +305,20 @@ static int select_rules_path(const char *requested_path, int lint_rules,
 }
 
 /*
+ * check_rules_with_daemon_parser - validate rules through policy.c parser.
+ * @f: opened rule stream positioned at the beginning.
+ * Returns CLI_EXIT_SUCCESS when the daemon parser accepts the stream, or
+ * CLI_EXIT_RULE_FILTER on parser failure.
+ */
+static int check_rules_with_daemon_parser(FILE *f)
+{
+	if (validate_rules_from_stream(f))
+		return CLI_EXIT_RULE_FILTER;
+
+	return CLI_EXIT_SUCCESS;
+}
+
+/*
  * check_rules_file - parse a rules file and optionally lint policy shape.
  * @path: rule file path to inspect, or NULL for the active rules file.
  * @lint_rules: non-zero enables policy lint warnings after syntax checks.
@@ -331,6 +346,13 @@ int check_rules_file(const char *path, int lint_rules)
 				path, strerror(errno));
 		return CLI_EXIT_IO;
 	}
+
+	rc = check_rules_with_daemon_parser(f);
+	if (rc) {
+		fclose(f);
+		return rc;
+	}
+	rewind(f);
 
 	if (rules_create(&temp_rules)) {
 		fprintf(stderr, "Failed to create rules list\n");

@@ -86,6 +86,7 @@ typedef struct {
 int dec_name_to_val(const char *name);
 int load_rules(const conf_t *config);
 int load_rules_from_stream(const conf_t *config, FILE *f);
+int validate_rules_from_stream(FILE *f);
 int load_rule_file(void);
 int do_reload_rules(const conf_t *config);
 void set_reload_rules(void);

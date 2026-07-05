@@ -58,6 +58,7 @@
 					// decision, permission, obj & subj
 #define NGID_LIMIT		32	// Limit buffer size allocated for
 					// subject to not waste memory
+#define VALIDATION_SYSLOG_FORMAT "rule,dec,perm,auid,pid,exe,:,path,ftype"
 
 /*
  * policy_snapshot - coherent policy generation used for decisions
@@ -736,6 +737,33 @@ int load_rules_from_stream(const conf_t *_config, FILE *f)
 	}
 
 	publish_policy_snapshot(policy);
+	return 0;
+}
+
+/*
+ * validate_rules_from_stream - parse policy without publishing it.
+ * @f: rule stream positioned at the beginning.
+ *
+ * Returns 0 when the daemon parser accepts the candidate policy, 1 otherwise.
+ */
+int validate_rules_from_stream(FILE *f)
+{
+	conf_t validation_config = {
+		.syslog_format = VALIDATION_SYSLOG_FORMAT
+	};
+	struct policy_snapshot *policy = NULL;
+
+	if (!f)
+		return 1;
+
+	/*
+	 * Rule validation only needs a valid syslog_format so the daemon policy
+	 * snapshot parser can run without depending on /etc/fapolicyd.conf.
+	 */
+	if (build_policy_snapshot(&validation_config, f, NULL, &policy))
+		return 1;
+
+	policy_snapshot_put(policy);
 	return 0;
 }
 

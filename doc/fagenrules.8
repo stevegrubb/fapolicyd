@@ -13,8 +13,13 @@ files in \fI/etc/fapolicyd/rules.d\fP are ignored.
 .P
 The files are concatenated in order, based on their natural sort (see -v option of ls(1)) and stripped of empty and comment (#) lines.
 .P
-The generated file is only copied to \fI/etc/fapolicyd/compiled.rules\fP, if
-it differs.
+The generated file is validated with the daemon policy parser before
+installation. If it differs from the existing compiled rules, it is synced and
+atomically renamed into \fI/etc/fapolicyd/compiled.rules\fP so the previous
+compiled rules remain in place on validation or installation failure.
+.P
+\fBfagenrules\fP prints the final SHA-256 ruleset identity when the installed
+compiled rules are unchanged or successfully updated.
 .SH OPTIONS
 .TP
 .B \-\-check
