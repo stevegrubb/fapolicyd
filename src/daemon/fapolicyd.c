@@ -1,6 +1,6 @@
 /*
  * fapolicyd.c - Main file for the program
- * Copyright (c) 2016,2018-22 Red Hat Inc.
+ * Copyright (c) 2016-26 Red Hat Inc.
  * All Rights Reserved.
  *
  * This software may be freely redistributed and/or modified under the

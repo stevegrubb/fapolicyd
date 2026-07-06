@@ -1,3 +1,12 @@
+/*
+ * avl.h - Header file for avl.c
+ * Copyright (c) 2019-20,2022,2026 Red Hat Inc.
+ *
+ * This file contains declarations for code adapted from Netdata's AVL
+ * implementation and libavl. Those AVL routines are licensed under the
+ * GNU Lesser General Public License (LGPL).
+ */
+
 #ifndef AVL_HEADER
 #define AVL_HEADER
 

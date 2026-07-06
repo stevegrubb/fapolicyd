@@ -2,6 +2,11 @@
  * systemd-notify.h - minimal systemd notify/watchdog integration
  * Copyright (c) 2026 Red Hat Inc.
  * All Rights Reserved.
+ *
+ * This software may be freely redistributed and/or modified under the
+ * terms of the GNU General Public License as published by the Free
+ * Software Foundation; either version 2, or (at your option) any
+ * later version.
  */
 
 #ifndef SYSTEMD_NOTIFY_HEADER

@@ -1,6 +1,8 @@
 /*
  * md5-backend.c - functions for adding files to the trust database
  * based on MD5 hashes.
+ * Copyright (c) 2023-26 Red Hat Inc.
+ * All Rights Reserved.
  *
  * This software may be freely redistributed and/or modified under the
  * terms of the GNU General Public License as published by the Free

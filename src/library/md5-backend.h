@@ -1,5 +1,7 @@
 /*
  * md5-backend.h - header file for md5-backend.c
+ * Copyright (c) 2023-24,2026 Red Hat Inc.
+ * All Rights Reserved.
  *
  * This software may be freely redistributed and/or modified under the
  * terms of the GNU General Public License as published by the Free

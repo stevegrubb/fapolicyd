@@ -1,5 +1,5 @@
 /* daemon-config.h --
- * Copyright 2018-20 Red Hat Inc.
+ * Copyright 2018-21,2026 Red Hat Inc.
  * All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify

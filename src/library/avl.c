@@ -1,3 +1,12 @@
+/*
+ * avl.c - AVL tree helpers
+ * Copyright (c) 2019-22,2026 Red Hat Inc.
+ *
+ * This file contains code adapted from Netdata's AVL implementation and
+ * libavl. Those AVL routines are licensed under the GNU Lesser General
+ * Public License (LGPL). See the provenance note below.
+ */
+
 //#include "config.h"
 #include <stddef.h> // for NULL
 #include "avl.h"

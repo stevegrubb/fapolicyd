@@ -1,6 +1,6 @@
 /*
  * fapolicy-rpm-loader.c - loader tool for fapolicyd
- * Copyright (c) 2025-2025 Red Hat Inc.
+ * Copyright (c) 2025-26 Red Hat Inc.
  * All Rights Reserved.
  *
  * This software may be freely redistributed and/or modified under the

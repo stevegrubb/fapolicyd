@@ -1,5 +1,5 @@
 # Makefile.am --
-# Copyright 2016,2018 Red Hat Inc., Durham, North Carolina.
+# Copyright 2016,2018-21,2023,2026 Red Hat Inc.
 # All Rights Reserved.
 #
 # This program is free software; you can redistribute it and/or modify
