@@ -4,6 +4,8 @@
 - Adjust reports to include aggregate and per decision worker numbers
 - Convert fapolicyd service type to watchdog based
 - Make fagenrules follow the generational update pattern
+- Fix Debian backend to work again
+- Add filter support for Debian backend
 
 1.6
 - Many internal changes
