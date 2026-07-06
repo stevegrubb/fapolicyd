@@ -140,9 +140,12 @@ rpm_backend_test_LDADD = ${top_builddir}/src/.libs/libfapolicyd.la
 endif
 
 if WITH_DEB
-check_PROGRAMS += deb_test md5_backend_test
+check_PROGRAMS += deb_test md5_backend_test deb_filter_test
 LIBS += -ldpkg -lmd
 deb_test_CFLAGS = -std=gnu11 -fPIE -DPIE -pthread -g -W -Wall -Wshadow -Wundef -Wno-unused-result -Wno-unused-parameter -D_GNU_SOURCE -DLIBDPKG_VOLATILE_API
+deb_test_CPPFLAGS = \
+	-I${top_srcdir}/src/library/ \
+	-DTEST_BASE=\"${top_srcdir}\"
 deb_test_LDFLAGS = -pie -Wl,-z,relro -Wl,-z,now
 deb_test_LDADD = ${top_builddir}/src/.libs/libfapolicyd.la -ldpkg -lmd
 deb_test_SOURCES = \
@@ -155,6 +158,13 @@ md5_backend_test_CFLAGS = $(deb_test_CFLAGS)
 md5_backend_test_LDFLAGS = $(deb_test_LDFLAGS)
 md5_backend_test_LDADD = ${top_builddir}/src/.libs/libfapolicyd.la -ldpkg -lmd
 md5_backend_test_SOURCES = md5_backend_test.c test-stubs.c
+deb_filter_test_CFLAGS = $(deb_test_CFLAGS)
+deb_filter_test_CPPFLAGS = \
+	-I${top_srcdir}/src/library/ \
+	-DTEST_BASE=\"${top_srcdir}\"
+deb_filter_test_LDFLAGS = $(deb_test_LDFLAGS)
+deb_filter_test_LDADD = ${top_builddir}/src/.libs/libfapolicyd.la -ldpkg -lmd
+deb_filter_test_SOURCES = deb_filter_test.c test-stubs.c
 endif
 
 TESTS = $(check_PROGRAMS)

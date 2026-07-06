@@ -14,6 +14,7 @@
 
 #include "conf.h"
 #include "fapolicyd-backend.h"
+#include "filter.h"
 #include "file.h"
 #include "message.h"
 #include "md5-backend.h"
@@ -119,6 +120,70 @@ void parse_filehash2(struct pkginfo *pkg, struct pkgbin *pkgbin)
 // End of functions copied from dpkg.
 // =======================================================================
 
+/*
+ * deb_load_filter_if_needed - ensure the trust-source filter is available.
+ *
+ * The daemon may already have loaded the global filter during SIGHUP
+ * reconfiguration. Startup and standalone tests can reach the deb backend
+ * without that step, so initialize the shared filter only when needed.
+ * Returns 0 on success and 1 when the filter cannot be loaded.
+ */
+static int deb_load_filter_if_needed(void)
+{
+  if (global_filter != NULL)
+    return 0;
+
+  if (filter_init())
+    return 1;
+
+  if (filter_load_file(NULL)) {
+    filter_destroy();
+    return 1;
+  }
+
+  return 0;
+}
+
+/*
+ * deb_add_file_to_backend - add one dpkg file after filter evaluation.
+ *
+ * Paths excluded by fapolicyd-filter.conf are skipped before opening or
+ * hashing the file, matching the rpm backend's trust-source pruning.
+ * Returns the MD5 backend result for included paths, or MD5_BACKEND_SKIPPED
+ * when the filter excludes the path.
+ */
+static md5_backend_result_t
+deb_add_file_to_backend(const char *path, const char *hash,
+                        struct _hash_record **hashtable)
+{
+  filter_rc_t f_res = filter_check(path);
+
+  if (f_res != FILTER_ALLOW) {
+    if (f_res == FILTER_ERR_DEPTH)
+      msg(LOG_WARNING,
+          "filter nesting exceeds MAX_FILTER_DEPTH for %s; excluding",
+          path);
+    return MD5_BACKEND_SKIPPED;
+  }
+
+  return add_file_to_backend_by_md5(path, hash, hashtable, SRC_DEB,
+                                    &deb_backend);
+}
+
+/*
+ * deb_backend_add_file_for_tests - exercise debdb add/filter behavior.
+ * @path: package-owned path to evaluate.
+ * @hash: package MD5 string for the path.
+ * @hashtable: duplicate-tracking table used by the MD5 backend helper.
+ * Returns the same result as the internal debdb add path.
+ */
+md5_backend_result_t deb_backend_add_file_for_tests(const char *path,
+						    const char *hash,
+						    struct _hash_record **hashtable)
+{
+  return deb_add_file_to_backend(path, hash, hashtable);
+}
+
 static int do_deb_load_list(const conf_t *conf)
 {
   const char *control_file = "md5sums";
@@ -167,11 +232,11 @@ static int do_deb_load_list(const conf_t *conf)
                              ? namenode->divert->useinstead->name
                              : namenode->name;
       if (hash != NULL) {
-        if (add_file_to_backend_by_md5(path, hash, hashtable_ptr, SRC_DEB,
-				   &deb_backend) == MD5_BACKEND_FATAL) {
-	  rc = 1;
-	  goto out;
-	}
+        if (deb_add_file_to_backend(path, hash, hashtable_ptr) ==
+            MD5_BACKEND_FATAL) {
+          rc = 1;
+          goto out;
+        }
       }
       file = file->next;
     }
@@ -232,6 +297,14 @@ static int deb_init_backend(void)
   status = modstatdb_open(msdbrw_readonly);
   if (status != msdbrw_readonly) {
     msg(LOG_ERR, "Could not open database for reading. Status %d", status);
+    dpkg_program_done();
+    return 1;
+  }
+
+  if (deb_load_filter_if_needed()) {
+    msg(LOG_ERR, "Failed loading filter for debdb backend");
+    modstatdb_shutdown();
+    dpkg_program_done();
     return 1;
   }
 
