@@ -25,6 +25,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <openssl/md5.h>
 #include <openssl/sha.h>
@@ -44,7 +46,7 @@
  * Dpkg does not provide sha256 sums or file sizes to verify against.
  * The only source for verification is MD5. The logic implemented is:
  * 1) Calculate the MD5 sum and compare to the expected hash. If it does
- *    not match, abort.
+ *    not match, skip the file.
  * 2) Calculate the SHA256 and file size on the local files.
  * 3) Add to database.
  *
@@ -54,14 +56,22 @@
  * This function would compute a sha256 and file size on the attackers
  * crafted file so they do not secure this backend.
  *
- * Returns 0 when the file was added, 1 when the file was skipped
- * (benign per-file condition), and -1 on a fatal error that leaves
- * the backend snapshot unusable.
+ * Returns MD5_BACKEND_ADDED when the file was recorded or already present,
+ * MD5_BACKEND_SKIPPED for per-file conditions expected from dpkg state drift,
+ * and MD5_BACKEND_FATAL when the backend snapshot is unsafe to use.
  */
-int add_file_to_backend_by_md5(const char *path, const char *expected_md5,
+md5_backend_result_t add_file_to_backend_by_md5(const char *path,
+			       const char *expected_md5,
 			       struct _hash_record **hashtable,
 			       trust_src_t trust_src, backend *dstbackend)
 {
+
+	if (path == NULL || expected_md5 == NULL || hashtable == NULL ||
+	    dstbackend == NULL || dstbackend->memfd < 0) {
+		msg(LOG_ERR, "Invalid MD5 backend destination for %s",
+		    path ? path : "(null)");
+		return MD5_BACKEND_FATAL;
+	}
 
 	#ifdef DEBUG
 	msg(LOG_DEBUG, "Adding %s", path);
@@ -72,23 +82,23 @@ int add_file_to_backend_by_md5(const char *path, const char *expected_md5,
 	struct stat path_stat;
 	if (fd < 0) {
 		if (errno != ELOOP) // Don't report symlinks as a warning
-			msg(LOG_WARNING, "Could not open %si, %s", path,
+			msg(LOG_WARNING, "Could not open %s, %s", path,
 			    strerror(errno));
-		return 1;
+		return MD5_BACKEND_SKIPPED;
 	}
 
 	if (fstat(fd, &path_stat)) {
 		close(fd);
 		msg(LOG_WARNING, "fstat file %s failed %s", path,
 		    strerror(errno));
-		return 1;
+		return MD5_BACKEND_SKIPPED;
 	}
 
 	// If its not a regular file, skip.
 	if (!S_ISREG(path_stat.st_mode)) {
 		close(fd);
 		msg(LOG_DEBUG, "Not regular file %s", path);
-		return 1;
+		return MD5_BACKEND_SKIPPED;
 	}
 
 	size_t file_size = path_stat.st_size;
@@ -102,14 +112,14 @@ int add_file_to_backend_by_md5(const char *path, const char *expected_md5,
 	if (md5_digest == NULL) {
 		close(fd);
 		msg(LOG_ERR, "MD5 digest returned NULL");
-		return 1;
+		return MD5_BACKEND_FATAL;
 	}
 	if (strcmp(md5_digest, expected_md5) != 0) {
 		msg(LOG_WARNING, "Skipping %s: hash mismatch. Got %s, expected %s",
 				path, md5_digest, expected_md5);
 		close(fd);
 		free(md5_digest);
-		return 1;
+		return MD5_BACKEND_SKIPPED;
 	}
 	free(md5_digest);
 
@@ -120,41 +130,54 @@ int add_file_to_backend_by_md5(const char *path, const char *expected_md5,
 
 	if (sha_digest == NULL) {
 		msg(LOG_ERR, "Sha digest returned NULL");
-		return 1;
+		return MD5_BACKEND_FATAL;
 	}
 
 	char *data;
 	if (asprintf(&data, DATA_FORMAT, trust_src, file_size, sha_digest) == -1) {
-		data = NULL;
+		msg(LOG_ERR, "Out of memory formatting trust data for %s", path);
+		free(sha_digest);
+		return MD5_BACKEND_FATAL;
 	}
 	free(sha_digest);
 
-	if (data) {
-		// Getting rid of the duplicates.
-		struct _hash_record *rcd = NULL;
-		char key[kMaxKeyLength];
-		snprintf(key, kMaxKeyLength - 1, "%s %s", path, data);
+	// Getting rid of the duplicates.
+	struct _hash_record *rcd = NULL;
+	char *key = NULL;
 
-		HASH_FIND_STR(*hashtable, key, rcd);
-
-		if (!rcd) {
-			rcd = (struct _hash_record *)malloc(
-						sizeof(struct _hash_record));
-			rcd->key = strdup(key);
-			HASH_ADD_KEYPTR(hh, *hashtable, rcd->key,
-					strlen(rcd->key), rcd);
-			if (dprintf(dstbackend->memfd, "%s %s\n",
-				    path, data) < 0) {
-				msg(LOG_ERR,
-				    "dprintf failed writing %s to memfd (%s)",
-				    path, strerror(errno));
-				free((void *)data);
-				return -1;
-			}
-		}
+	if (asprintf(&key, "%s %s", path, data) == -1) {
+		msg(LOG_ERR, "Out of memory tracking %s", path);
 		free((void *)data);
-		return 0;
+		return MD5_BACKEND_FATAL;
 	}
-	return 1;
-}
 
+	HASH_FIND_STR(*hashtable, key, rcd);
+
+	if (!rcd) {
+		rcd = (struct _hash_record *)malloc(
+					sizeof(struct _hash_record));
+		if (rcd == NULL) {
+			msg(LOG_ERR, "Out of memory tracking %s", path);
+			free(key);
+			free((void *)data);
+			return MD5_BACKEND_FATAL;
+		}
+		rcd->key = key;
+		if (dprintf(dstbackend->memfd, "%s %s\n",
+			    path, data) < 0) {
+			msg(LOG_ERR,
+			    "dprintf failed writing %s to memfd (%s)",
+			    path, strerror(errno));
+			free(key);
+			free(rcd);
+			free((void *)data);
+			return MD5_BACKEND_FATAL;
+		}
+		HASH_ADD_KEYPTR(hh, *hashtable, rcd->key,
+				strlen(rcd->key), rcd);
+	} else {
+		free(key);
+	}
+	free((void *)data);
+	return MD5_BACKEND_ADDED;
+}

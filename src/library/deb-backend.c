@@ -168,7 +168,7 @@ static int do_deb_load_list(const conf_t *conf)
                              : namenode->name;
       if (hash != NULL) {
         if (add_file_to_backend_by_md5(path, hash, hashtable_ptr, SRC_DEB,
-				   &deb_backend) < 0) {
+				   &deb_backend) == MD5_BACKEND_FATAL) {
 	  rc = 1;
 	  goto out;
 	}
@@ -244,4 +244,3 @@ static int deb_destroy_backend(void)
   modstatdb_shutdown();
   return 0;
 }
-

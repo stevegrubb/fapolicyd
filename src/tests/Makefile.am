@@ -140,7 +140,7 @@ rpm_backend_test_LDADD = ${top_builddir}/src/.libs/libfapolicyd.la
 endif
 
 if WITH_DEB
-check_PROGRAMS += deb_test
+check_PROGRAMS += deb_test md5_backend_test
 LIBS += -ldpkg -lmd
 deb_test_CFLAGS = -std=gnu11 -fPIE -DPIE -pthread -g -W -Wall -Wshadow -Wundef -Wno-unused-result -Wno-unused-parameter -D_GNU_SOURCE -DLIBDPKG_VOLATILE_API
 deb_test_LDFLAGS = -pie -Wl,-z,relro -Wl,-z,now
@@ -151,6 +151,10 @@ deb_test_SOURCES = \
   ${top_srcdir}/src/library/file.c \
   ${top_srcdir}/src/library/backend-manager.c \
   ${top_srcdir}/src/library/deb-backend.c
+md5_backend_test_CFLAGS = $(deb_test_CFLAGS)
+md5_backend_test_LDFLAGS = $(deb_test_LDFLAGS)
+md5_backend_test_LDADD = ${top_builddir}/src/.libs/libfapolicyd.la -ldpkg -lmd
+md5_backend_test_SOURCES = md5_backend_test.c test-stubs.c
 endif
 
 TESTS = $(check_PROGRAMS)
