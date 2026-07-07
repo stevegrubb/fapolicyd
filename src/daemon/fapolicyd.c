@@ -124,7 +124,8 @@ static void install_syscall_filter(void)
 	ctx = seccomp_init(SCMP_ACT_ALLOW);
 	if (ctx == NULL)
 		goto err_out;
-#ifndef USE_RPM
+#if !defined(USE_RPM) && !defined(USE_DEB)
+	// Package-database backends spawn libexec helpers during startup.
 	rc = seccomp_rule_add(ctx, SCMP_ACT_ERRNO(EACCES),
 				SCMP_SYS(execve), 0);
 	if (rc < 0)
