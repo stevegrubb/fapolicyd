@@ -11,10 +11,11 @@ sbin_PROGRAMS = fapolicyd fapolicyd-cli
 if WITH_PERF_TEST
 sbin_PROGRAMS += fapolicyd-perf-test
 endif
+libexec_PROGRAMS =
 
 lib_LTLIBRARIES= libfapolicyd.la
 
-fapolicyd_CFLAGS = -std=gnu11 -fPIE -DPIE -pthread -g -W -Wall -Wshadow -Wundef -Wno-unused-result -Wno-unused-parameter -D_GNU_SOURCE
+fapolicyd_CFLAGS = -std=gnu11 -fPIE -DPIE -pthread -g -W -Wall -Wshadow -Wundef -Wno-unused-result -Wno-unused-parameter -D_GNU_SOURCE -DLIBEXECDIR='"$(libexecdir)"'
 fapolicyd_LDFLAGS = -pie -Wl,-z,relro -Wl,-z,now  -static
 fapolicyd_LDADD = libfapolicyd.la
 
@@ -105,12 +106,11 @@ if WITH_RPM
 libfapolicyd_la_SOURCES += \
 	library/rpm-backend.c
 
-libexec_PROGRAMS = fapolicyd-rpm-loader
+libexec_PROGRAMS += fapolicyd-rpm-loader
 
 fapolicyd_rpm_loader_SOURCES = \
 	handler/fapolicyd-rpm-loader.c
 
-fapolicyd_CFLAGS += -DLIBEXECDIR='"$(libexecdir)"'
 fapolicyd_rpm_loader_CFLAGS = $(fapolicyd_CFLAGS)
 fapolicyd_rpm_loader_LDFLAGS = $(fapolicyd_LDFLAGS)
 fapolicyd_rpm_loader_LDADD = libfapolicyd.la
@@ -119,6 +119,12 @@ endif
 if WITH_DEB
 libfapolicyd_la_SOURCES += library/deb-backend.c
 libfapolicyd_la_LIBADD = -ldpkg -lmd
+libexec_PROGRAMS += fapolicyd-deb-loader
+fapolicyd_deb_loader_SOURCES = \
+	handler/fapolicyd-deb-loader.c
+fapolicyd_deb_loader_CFLAGS = $(fapolicyd_CFLAGS)
+fapolicyd_deb_loader_LDFLAGS = $(fapolicyd_LDFLAGS)
+fapolicyd_deb_loader_LDADD = libfapolicyd.la
 fapolicyd_CFLAGS += -DLIBDPKG_VOLATILE_API
 LIBS += -ldpkg -lmd
 endif

@@ -148,12 +148,7 @@ deb_test_CPPFLAGS = \
 	-DTEST_BASE=\"${top_srcdir}\"
 deb_test_LDFLAGS = -pie -Wl,-z,relro -Wl,-z,now
 deb_test_LDADD = ${top_builddir}/src/.libs/libfapolicyd.la -ldpkg -lmd
-deb_test_SOURCES = \
-  deb_test.c \
-  test-stubs.c \
-  ${top_srcdir}/src/library/file.c \
-  ${top_srcdir}/src/library/backend-manager.c \
-  ${top_srcdir}/src/library/deb-backend.c
+deb_test_SOURCES = deb_test.c test-stubs.c
 md5_backend_test_CFLAGS = $(deb_test_CFLAGS)
 md5_backend_test_LDFLAGS = $(deb_test_LDFLAGS)
 md5_backend_test_LDADD = ${top_builddir}/src/.libs/libfapolicyd.la -ldpkg -lmd

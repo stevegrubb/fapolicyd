@@ -1,66 +1,70 @@
-#include <stddef.h>
+/*
+ * deb_test.c - verify deb backend loader failure handling
+ */
+
+#include "config.h"
+
+#include <error.h>
 #include <string.h>
-#include <stdatomic.h>
+#include <unistd.h>
 
 #include "backend-manager.h"
-#include "conf.h"
-#include "config.h"
-#include "filter.h"
-#include "message.h"
+#include "fapolicyd-backend.h"
 
-#define FILTER_CONF TEST_BASE "/src/tests/fixtures/filter-minimal.conf"
+extern backend deb_backend;
 
-extern atomic_bool stop;
+#define CHECK(expr, code, msg) \
+	do { \
+		if (!(expr)) \
+			error(code, 0, "%s", msg); \
+	} while (0)
 
-int main(int argc, char* const argv[]) {
-  set_message_mode(MSG_STDERR, DBG_YES);
-  int rc = 1;
+/*
+ * true_path - find a harmless helper that exits without sending an fd.
+ * Returns an executable path, or NULL when none is available.
+ */
+static const char *true_path(void)
+{
+	if (access("/bin/true", X_OK) == 0)
+		return "/bin/true";
+	if (access("/usr/bin/true", X_OK) == 0)
+		return "/usr/bin/true";
+	return NULL;
+}
 
-  if (filter_init()) {
-    msg(LOG_ERR, "ERROR: filter_init failed");
-    return 1;
-  }
-  if (filter_load_file(FILTER_CONF)) {
-    msg(LOG_ERR, "ERROR: filter_load_file failed");
-    filter_destroy();
-    return 1;
-  }
+/*
+ * main - run deb loader IPC failure coverage.
+ * Returns 0 on success. Exits with error() on test failure.
+ */
+int main(void)
+{
+	const char *path = true_path();
+	conf_t cfg;
+	backend_entry *entry;
+	int rc;
 
-  conf_t conf;
-  conf.trust = "debdb";
-  if (backend_init(&conf)) {
-    msg(LOG_ERR, "ERROR: debdb init failed");
-    goto out_filter;
-  }
-  if (backend_load(&conf)) {
-    msg(LOG_ERR, "ERROR: debdb load failed");
-    goto out_backend;
-  }
+	if (path == NULL)
+		return 77;
 
-  msg(LOG_INFO, "\nDone loading.");
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.trust = "debdb";
 
-  backend_entry* debdb_entry = backend_get_first();
-  backend* debdb = NULL;
-  if (debdb_entry != NULL) {
-    debdb = debdb_entry->backend;
-  } else {
-    msg(LOG_ERR, "ERROR: No backends registered.");
-  }
-  if (debdb == NULL) {
-    msg(LOG_ERR, "ERROR: debdb not registered");
-    goto out_backend;
-  }
-  if (strcmp(conf.trust, debdb->name) != 0) {
-    msg(LOG_ERR, "ERROR: debdb bad name");
-    goto out_backend;
-  }
+	CHECK(backend_init(&cfg) == 0, 1, "[ERROR:1] debdb init failed");
+	entry = backend_get_first();
+	CHECK(entry != NULL, 2, "[ERROR:2] debdb backend not registered");
+	CHECK(strcmp(entry->backend->name, cfg.trust) == 0, 3,
+	      "[ERROR:3] debdb backend name mismatch");
 
-  rc = 0;
+	deb_backend.memfd = -1;
+	deb_backend.entries = -1;
 
-out_backend:
-  backend_close();
-out_filter:
-  filter_destroy();
+	rc = deb_backend_load_from_path_for_tests(&cfg, path);
+	CHECK(rc != 0, 4, "[ERROR:4] deb IPC failure returned success");
+	CHECK(deb_backend.memfd == -1, 5,
+	      "[ERROR:5] failed deb load published a memfd");
+	CHECK(deb_backend.entries == -1, 6,
+	      "[ERROR:6] failed deb load published entries");
 
-  return rc;
+	backend_close();
+	return 0;
 }

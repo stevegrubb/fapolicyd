@@ -25,11 +25,16 @@
 #include <dpkg/program.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <unistd.h>
+#include <spawn.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <uthash.h>
 
@@ -45,6 +50,9 @@ static const char kDebBackend[] = "debdb";
 static int deb_init_backend(void);
 static int deb_load_list(const conf_t *);
 static int deb_destroy_backend(void);
+int do_deb_init_backend(void);
+int do_deb_load_list(const conf_t *, int memfd);
+int do_deb_destroy_backend(void);
 
 backend deb_backend = {
     kDebBackend,
@@ -54,6 +62,9 @@ backend deb_backend = {
     -1,
     -1,
 };
+
+#define BUFFER_SIZE 4096
+static const char *deb_loader_path = LIBEXECDIR "/fapolicyd-deb-loader";
 
 // ================================================================
 // These functions are copied from dpkg source v1.21.1
@@ -142,30 +153,6 @@ void parse_filehash2(struct pkginfo *pkg, struct pkgbin *pkgbin)
 // =======================================================================
 
 /*
- * deb_load_filter_if_needed - ensure the trust-source filter is available.
- *
- * The daemon may already have loaded the global filter during SIGHUP
- * reconfiguration. Startup and standalone tests can reach the deb backend
- * without that step, so initialize the shared filter only when needed.
- * Returns 0 on success and 1 when the filter cannot be loaded.
- */
-static int deb_load_filter_if_needed(void)
-{
-  if (global_filter != NULL)
-    return 0;
-
-  if (filter_init())
-    return 1;
-
-  if (filter_load_file(NULL)) {
-    filter_destroy();
-    return 1;
-  }
-
-  return 0;
-}
-
-/*
  * deb_add_file_to_backend - add one dpkg file after filter evaluation.
  *
  * Paths excluded by fapolicyd-filter.conf are skipped before opening or
@@ -205,12 +192,21 @@ md5_backend_result_t deb_backend_add_file_for_tests(const char *path,
   return deb_add_file_to_backend(path, hash, hashtable);
 }
 
-static int do_deb_load_list(const conf_t *conf)
+int do_deb_load_list(const conf_t *conf, int memfd)
 {
   const char *control_file = "md5sums";
 
   struct _hash_record *hashtable = NULL;
   struct _hash_record **hashtable_ptr = &hashtable;
+  long entries = 0;
+
+  if (memfd < 0) {
+    msg(LOG_ERR, "Invalid memfd supplied to deb loader");
+    return 1;
+  }
+
+  deb_backend.memfd = memfd;
+  deb_backend.entries = -1;
 
   struct pkg_array array;
   pkg_array_init_from_hash(&array);
@@ -253,11 +249,14 @@ static int do_deb_load_list(const conf_t *conf)
                              ? namenode->divert->useinstead->name
                              : namenode->name;
       if (hash != NULL) {
-        if (deb_add_file_to_backend(path, hash, hashtable_ptr) ==
-            MD5_BACKEND_FATAL) {
+        md5_backend_result_t add_rc =
+            deb_add_file_to_backend(path, hash, hashtable_ptr);
+        if (add_rc == MD5_BACKEND_FATAL) {
           rc = 1;
           goto out;
         }
+        if (add_rc == MD5_BACKEND_ADDED)
+          entries++;
       }
       file = file->next;
     }
@@ -272,43 +271,152 @@ out:
   }
 
   pkg_array_destroy(&array);
+  if (rc == 0)
+    deb_backend.entries = entries;
   return rc;
 }
 
 static int deb_load_list(const conf_t *conf)
 {
-        msg(LOG_DEBUG, "Loading debian backend");
-
-	int memfd = memfd_create("deb_snapshot",
-                                 MFD_CLOEXEC | MFD_ALLOW_SEALING);
-	deb_backend.memfd = memfd;
-	deb_backend.entries = -1;
-	if (memfd < 0) {
-		msg(LOG_ERR, "memfd_create failed for debian backend (%s)",
-		    strerror(errno));
+	int sv[2];
+	if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv) < 0) {
+		msg(LOG_ERR, "socketpair failed");
 		return 1;
 	}
 
-	if (do_deb_load_list(conf) != 0) {
-		close(memfd);
-		deb_backend.memfd = -1;
+	posix_spawn_file_actions_t actions;
+	posix_spawn_file_actions_init(&actions);
+
+	// dup sv[1] to FD 3 for the child; SOCK_CLOEXEC ensures both
+	// sv[0] and sv[1] are closed on exec, and dup2 clears CLOEXEC
+	// on the target FD 3. When sv[1] is already 3, dup2(3,3) is a
+	// no-op that does NOT clear CLOEXEC, so move sv[1] to a
+	// different FD to avoid the overlap.
+	if (sv[1] == 3) {
+		int tmp = fcntl(sv[1], F_DUPFD_CLOEXEC, 4);
+		if (tmp < 0) {
+			msg(LOG_ERR, "fcntl F_DUPFD_CLOEXEC failed");
+			close(sv[0]);
+			close(sv[1]);
+			posix_spawn_file_actions_destroy(&actions);
+			return 1;
+		}
+		close(sv[1]);
+		sv[1] = tmp;
+	}
+	posix_spawn_file_actions_adddup2(&actions, sv[1], 3);
+
+	char *argv[] = { "fapolicyd-deb-loader", NULL };
+	char *custom_env[] = { "FAPO_SOCK_FD=3", NULL };
+
+	pid_t pid = -1;
+	int status = posix_spawn(&pid, deb_loader_path,
+				 &actions, NULL, argv, custom_env);
+	close(sv[1]);  // Parent doesn't write
+
+	if (status == 0) {
+		msg(LOG_DEBUG, "fapolicyd-deb-loader spawned with pid: %d",
+		    pid);
+
+		struct msghdr  _msg  = {0};
+		struct iovec   iov = { .iov_base = (char[1]){0}, .iov_len = 1 };
+		union {
+			struct cmsghdr align;
+			char buf[CMSG_SPACE(sizeof(int))];
+		} cmsgbuf;
+
+		_msg.msg_iov    = &iov;
+		_msg.msg_iovlen = 1;
+		_msg.msg_control = cmsgbuf.buf;
+		_msg.msg_controllen = sizeof cmsgbuf.buf;
+
+		ssize_t rc;
+		do {
+			rc = recvmsg(sv[0], &_msg, 0);
+		} while (rc < 0 && errno == EINTR);
+		if (rc < 0) {
+			char err_buff[BUFFER_SIZE];
+			msg(LOG_ERR, "recvmsg failed (%s)",
+			    strerror_r(errno, err_buff, BUFFER_SIZE));
+			close(sv[0]);
+			while (waitpid(pid, &status, 0) < 0 && errno == EINTR);
+			posix_spawn_file_actions_destroy(&actions);
+			return 1;
+		}
+		close(sv[0]);
+
+		struct cmsghdr *c = CMSG_FIRSTHDR(&_msg);
+		if (!c || c->cmsg_type != SCM_RIGHTS) {
+			msg(LOG_ERR, "missing fd");
+			while (waitpid(pid, &status, 0) < 0 && errno == EINTR);
+			posix_spawn_file_actions_destroy(&actions);
+			return 1;
+		}
+
+		int memfd;
+		memcpy(&memfd, CMSG_DATA(c), sizeof memfd);
+
+		// Mark entries unknown until a fresh snapshot is available.
 		deb_backend.entries = -1;
-		msg(LOG_WARNING,
-		    "Failed making debian backend snapshot due to load error");
-		return 1;
+
+		if (fcntl(memfd, F_SETFD, FD_CLOEXEC) == -1) {
+			char err_buff[BUFFER_SIZE];
+			msg(LOG_WARNING,
+			    "Failed to set CLOEXEC on deb memfd (%s)",
+			    strerror_r(errno, err_buff, BUFFER_SIZE));
+		}
+
+		// Pass the memfd to the backend representation.
+		deb_backend.memfd = memfd;
+
+		while (waitpid(pid, &status, 0) < 0 && errno == EINTR);
+	} else {
+		close(sv[0]);
+		msg(LOG_ERR, "posix_spawn failed: %s\n", strerror(status));
 	}
 
-	/* Seal the snapshot so readers see a stable view. */
-	if (fcntl(memfd, F_ADD_SEALS, F_SEAL_SHRINK |
-		  F_SEAL_GROW | F_SEAL_WRITE) == -1)
-		// Not a fatal error
-		msg(LOG_WARNING, "Failed to seal debian backend memfd (%s)",
-		    strerror(errno));
+	posix_spawn_file_actions_destroy(&actions);
 
-	return 0;
+	int exit_rc = status;
+	if (status) {
+		if (WIFEXITED(status))
+			exit_rc = WEXITSTATUS(status);
+		else if (WIFSIGNALED(status))
+			exit_rc = 128 + WTERMSIG(status);
+	}
+
+	if (exit_rc)
+		msg(LOG_ERR, "fapolicyd-deb-loader exited with rc=%d",
+		    exit_rc);
+
+	return exit_rc;
+}
+
+/*
+ * deb_backend_load_from_path_for_tests - exercise deb loader IPC errors.
+ * @conf: test configuration.
+ * @loader_path: helper executable path to spawn.
+ *
+ * Returns the deb backend load result without terminating the caller.
+ */
+int deb_backend_load_from_path_for_tests(const conf_t *conf,
+					 const char *loader_path)
+{
+	const char *previous_loader_path = deb_loader_path;
+	int rc;
+
+	deb_loader_path = loader_path;
+	rc = deb_load_list(conf);
+	deb_loader_path = previous_loader_path;
+	return rc;
 }
 
 static int deb_init_backend(void)
+{
+  return 0;
+}
+
+int do_deb_init_backend(void)
 {
   dpkg_program_init(kDebBackend);
 
@@ -322,8 +430,15 @@ static int deb_init_backend(void)
     return 1;
   }
 
-  if (deb_load_filter_if_needed()) {
+  if (filter_init()) {
+    msg(LOG_ERR, "Failed initializing filter for debdb backend");
+    modstatdb_shutdown();
+    dpkg_program_done();
+    return 1;
+  }
+  if (filter_load_file(NULL)) {
     msg(LOG_ERR, "Failed loading filter for debdb backend");
+    filter_destroy();
     modstatdb_shutdown();
     dpkg_program_done();
     return 1;
@@ -334,7 +449,13 @@ static int deb_init_backend(void)
 
 static int deb_destroy_backend(void)
 {
+  return 0;
+}
+
+int do_deb_destroy_backend(void)
+{
   dpkg_program_done();
   modstatdb_shutdown();
+  filter_destroy();
   return 0;
 }
