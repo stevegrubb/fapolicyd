@@ -6,7 +6,8 @@
 - Make fagenrules follow the generational update pattern
 - Fix Debian backend to work again
 - Add filter support for Debian backend
-- Add explicit glob: fnmatch patterns for exe and path rule attributes
+- Add support for globbing in rules using explicit glob demarcation
+- Fix logging to syslog/journald to not deadlock on log rotation
 
 1.6
 - Many internal changes
