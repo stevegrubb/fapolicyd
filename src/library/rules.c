@@ -73,32 +73,62 @@ static int assign_object(llist *l, lnode *n, int type,
 			 const char *ptr2, int lineno) __wur;
 
 /*
- * validate_dir_set - reject glob patterns on literal directory attributes
+ * validate_glob_set - validate explicitly marked glob values for an attribute
  * @type: parsed subject or object attribute type.
  * @set: parsed attribute value set.
  * @lineno: rule line number used for diagnostics.
  * @side: rule side used to make the diagnostic actionable.
  *
- * Directory attributes use prefix matching rather than fnmatch. Rejecting
- * metacharacters prevents an accepted rule from silently matching a literal
- * asterisk, question mark, or bracket instead of the intended path pattern.
+ * The glob: marker distinguishes pattern matching from the historical exact
+ * meaning of every unmarked value. Only exe and path consume patterns, and
+ * their patterns must describe absolute paths.
  *
  * Returns: 0 when the set is valid for the attribute, otherwise 1.
  */
-static int validate_dir_set(int type, const attr_sets_entry_t *set,
-			    int lineno, const char *side)
+static int validate_glob_set(int type, attr_sets_entry_t *set, int lineno,
+			     const char *side)
 {
-	const char *alternative;
+	avl_iterator iterator;
+	avl_str_data_t *entry;
+	const char *attribute;
 
-	if ((type != EXE_DIR && type != ODIR) || !set || !set->has_glob)
+	/* Other attributes use the same union member for scalar values. */
+	if (type != COMM && type != EXE && type != EXE_DIR &&
+	    type != EXE_TYPE && type != PATH && type != ODIR &&
+	    type != DEVICE && type != FTYPE && type != FILE_HASH)
+		return 0;
+	if (!set || !set->has_glob)
 		return 0;
 
-	alternative = type == EXE_DIR ? "exe" : "path";
-	msg(LOG_ERR,
-	    "rules: line:%d: %s dir does not support glob patterns; "
-	    "use %s for glob matching",
-	    lineno, side, alternative);
-	return 1;
+	attribute = type >= SUBJ_START && type <= SUBJ_END ?
+		subj_val_to_name(type, RULE_FMT_COLON) : obj_val_to_name(type);
+	if (type != EXE && type != PATH) {
+		msg(LOG_ERR,
+		    "rules: line:%d: %s %s does not support glob patterns; "
+		    "glob: is valid only with exe and path",
+		    lineno, side, attribute);
+		return 1;
+	}
+
+	for (entry = (avl_str_data_t *)avl_first(&iterator, &set->tree);
+	     entry; entry = (avl_str_data_t *)avl_next(&iterator)) {
+		const char *pattern;
+
+		if (strncmp(entry->str, ATTR_SET_GLOB_PREFIX,
+			    ATTR_SET_GLOB_PREFIX_LEN))
+			continue;
+
+		pattern = entry->str + ATTR_SET_GLOB_PREFIX_LEN;
+		if (pattern[0] != '/') {
+			msg(LOG_ERR,
+			    "rules: line:%d: %s %s glob pattern must be an "
+			    "absolute path",
+			    lineno, side, attribute);
+			return 1;
+		}
+	}
+
+	return 0;
 }
 
 /*
@@ -624,7 +654,7 @@ static int assign_subject(llist *l, lnode *n, int type,
 	} // switch
 
 finalize:
-	if (validate_dir_set(type, n->s[i].set, lineno, "subject"))
+	if (validate_glob_set(type, n->s[i].set, lineno, "subject"))
 		goto free_and_error;
 	warn_deprecated_untrusted_dir(type, n->s[i].set, lineno, "subject");
 	n->s_count++;
@@ -777,7 +807,7 @@ static int assign_object(llist *l, lnode *n, int type,
 
 
  finalize:
-	if (validate_dir_set(type, n->o[i].set, lineno, "object"))
+	if (validate_glob_set(type, n->o[i].set, lineno, "object"))
 		goto free_and_error;
 	warn_deprecated_untrusted_dir(type, n->o[i].set, lineno, "object");
 	n->o_count++;
@@ -1217,11 +1247,11 @@ static int check_dirs(unsigned int i, const char *path)
  * @set: string set assigned to an exe or path rule attribute.
  * @path: concrete executable or object path from the event.
  *
- * Exact lookup remains first so ordinary rules retain AVL lookup behavior and
- * literal filenames containing metacharacters still match themselves. Globs
- * are pathname-component scoped, case-sensitive, and require leading periods
- * to be explicit. The event path is never changed, so trust lookup and logging
- * continue to use the concrete path.
+ * Unmarked entries always use exact lookup, including literal filenames that
+ * contain glob metacharacters. Only entries beginning with glob: use fnmatch.
+ * Patterns are pathname-component scoped, case-sensitive, and require leading
+ * periods to be explicit. The event path is never changed, so trust lookup and
+ * logging continue to use the concrete path.
  *
  * Returns: 1 when an exact value or glob matches, otherwise 0.
  */
@@ -1230,15 +1260,17 @@ static int path_set_match(attr_sets_entry_t *set, const char *path)
 	avl_iterator iterator;
 	avl_str_data_t *entry;
 
+	if (!set || set->type != STRING || !set->has_glob || !path)
+		return attr_set_check_str(set, path);
 	if (attr_set_check_str(set, path))
 		return 1;
-	if (!set || set->type != STRING || !set->has_glob || !path)
-		return 0;
 
 	for (entry = (avl_str_data_t *)avl_first(&iterator, &set->tree);
 	     entry; entry = (avl_str_data_t *)avl_next(&iterator)) {
-		if (strpbrk(entry->str, "*?[") &&
-		    fnmatch(entry->str, path, FNM_PATHNAME | FNM_PERIOD) == 0)
+		if (strncmp(entry->str, ATTR_SET_GLOB_PREFIX,
+			    ATTR_SET_GLOB_PREFIX_LEN) == 0 &&
+		    fnmatch(entry->str + ATTR_SET_GLOB_PREFIX_LEN, path,
+			    FNM_PATHNAME | FNM_PERIOD) == 0)
 			return 1;
 	}
 

@@ -100,24 +100,40 @@ static const struct err_case errors[] = {
 	"trust can be set to 1 or 0"
 	},
 	{
-	{ "allow perm=any dir=/home/*/bin/ : all", NULL },
-	"subject dir does not support glob patterns; use exe for glob matching"
+	{ "allow perm=any dir=glob:/home/*/bin/ : all", NULL },
+	"subject dir does not support glob patterns; glob: is valid only with exe and path"
 	},
 	{
-	{ "allow perm=any all : dir=/home/*/bin/", NULL },
-	"object dir does not support glob patterns; use path for glob matching"
+	{ "allow perm=any all : dir=glob:/home/*/bin/", NULL },
+	"object dir does not support glob patterns; glob: is valid only with exe and path"
 	},
 	{
-	{ "%dirs=/home/*/bin/",
+	{ "%dirs=glob:/home/*/bin/",
 	  "allow perm=any dir=%dirs : all",
 	  NULL },
-	"subject dir does not support glob patterns; use exe for glob matching"
+	"subject dir does not support glob patterns; glob: is valid only with exe and path"
 	},
 	{
-	{ "%dirs=/home/*/bin/",
+	{ "%dirs=glob:/home/*/bin/",
 	  "allow perm=any all : dir=%dirs",
 	  NULL },
-	"object dir does not support glob patterns; use path for glob matching"
+	"object dir does not support glob patterns; glob: is valid only with exe and path"
+	},
+	{
+	{ "allow perm=any comm=glob:python* : all", NULL },
+	"subject comm does not support glob patterns; glob: is valid only with exe and path"
+	},
+	{
+	{ "allow perm=any all : ftype=glob:application/*", NULL },
+	"object ftype does not support glob patterns; glob: is valid only with exe and path"
+	},
+	{
+	{ "allow perm=any all : path=glob:", NULL },
+	"object path glob pattern must be an absolute path"
+	},
+	{
+	{ "allow perm=any exe=glob:opt/app-* : all", NULL },
+	"subject exe glob pattern must be an absolute path"
 	}
 };
 
@@ -372,8 +388,9 @@ static decision_t evaluate_glob_rule(const char *rule, const char *exe,
 /*
  * test_glob_rules - verify exe and path glob semantics
  *
- * Globs match whole paths without crossing directory components or matching a
- * leading period implicitly. Exact paths, escaped metacharacters, named sets,
+ * Explicitly marked globs match whole paths without crossing directory
+ * components or matching a leading period implicitly. Unmarked
+ * metacharacters remain exact for compatibility. Escapes, named sets,
  * immutable event paths, literal dir prefixes, and first-match ordering are
  * covered alongside the positive cases.
  *
@@ -389,79 +406,109 @@ static void test_glob_rules(void)
 		const char *name;
 	} cases[] = {
 		{
-			"allow perm=any all : path=/home/*/bin/tool",
+			"allow perm=any all : path=glob:/home/*/bin/tool",
 			"/usr/bin/bash", "/home/alice/bin/tool", ALLOW,
 			"object component wildcard"
 		},
 		{
-			"allow perm=any all : path=/home/*/bin/tool",
+			"allow perm=any all : path=glob:/home/*/bin/tool",
 			"/usr/bin/bash", "/home/alice/project/bin/tool",
 			NO_OPINION, "object wildcard crossed slash"
 		},
 		{
-			"allow perm=any all : path=/opt/app-?/bin/tool",
+			"allow perm=any all : path=glob:/opt/app-?/bin/tool",
 			"/usr/bin/bash", "/opt/app-7/bin/tool", ALLOW,
 			"question wildcard"
 		},
 		{
-			"allow perm=any all : path=/opt/app-?/bin/tool",
+			"allow perm=any all : path=glob:/opt/app-?/bin/tool",
 			"/usr/bin/bash", "/opt/app-77/bin/tool", NO_OPINION,
 			"question wildcard width"
 		},
 		{
-			"allow perm=any all : path=/srv/app-[0-9]/tool",
+			"allow perm=any all : path=glob:/srv/app-[0-9]/tool",
 			"/usr/bin/bash", "/srv/app-4/tool", ALLOW,
 			"bracket wildcard"
 		},
 		{
-			"allow perm=any all : path=/home/*/bin/tool",
+			"allow perm=any all : path=glob:/home/*/bin/tool",
 			"/usr/bin/bash", "/home/.admin/bin/tool", NO_OPINION,
 			"implicit leading period"
 		},
 		{
-			"allow perm=any all : path=/home/.*/bin/tool",
+			"allow perm=any all : path=glob:/home/.*/bin/tool",
 			"/usr/bin/bash", "/home/.admin/bin/tool", ALLOW,
 			"explicit leading period"
 		},
 		{
-			"allow perm=any all : path=/home/alice/bin/*",
+			"allow perm=any all : path=glob:/home/alice/bin/*",
 			"/usr/bin/bash", "/home/alice/bin/.tool", NO_OPINION,
 			"implicit basename period"
 		},
 		{
-			"allow perm=any all : path=/home/alice/bin/.*",
+			"allow perm=any all : path=glob:/home/alice/bin/.*",
 			"/usr/bin/bash", "/home/alice/bin/.tool", ALLOW,
 			"explicit basename period"
 		},
 		{
-			"allow perm=any all : path=/opt/app-*/bin/tool",
+			"allow perm=any all : path=glob:/opt/app-*/bin/tool",
 			"/usr/bin/bash", "/opt/app-2/bin/tool.bak", NO_OPINION,
 			"whole path matching"
 		},
 		{
-			"allow perm=any exe=/opt/vendor/app-*/bin/app : all",
+			"allow perm=any exe=glob:/opt/vendor/app-*/bin/app : all",
 			"/opt/vendor/app-2/bin/app", "/tmp/input", ALLOW,
 			"subject executable wildcard"
 		},
 		{
-			"allow perm=any exe=/opt/*/bin/app : all",
+			"allow perm=any exe=glob:/opt/*/bin/app : all",
 			"/opt/vendor/release/bin/app", "/tmp/input",
 			NO_OPINION, "subject wildcard crossed slash"
 		},
 		{
 			"allow perm=any all : path=/tmp/name[1]",
 			"/usr/bin/bash", "/tmp/name[1]", ALLOW,
-			"exact metacharacter path"
+			"literal bracket path"
 		},
 		{
-			"allow perm=any all : path=/tmp/name\\*",
+			"allow perm=any all : path=/tmp/name[1]",
+			"/usr/bin/bash", "/tmp/name1", NO_OPINION,
+			"literal bracket does not broaden"
+		},
+		{
+			"allow perm=any all : path=/tmp/name*",
 			"/usr/bin/bash", "/tmp/name*", ALLOW,
-			"escaped wildcard"
+			"literal star path"
 		},
 		{
-			"allow perm=any all : path=/no/match,/home/*/bin/tool",
+			"allow perm=any all : path=/tmp/name*",
+			"/usr/bin/bash", "/tmp/name1", NO_OPINION,
+			"literal star does not broaden"
+		},
+		{
+			"allow perm=any all : path=/tmp/name?",
+			"/usr/bin/bash", "/tmp/name1", NO_OPINION,
+			"literal question mark does not broaden"
+		},
+		{
+			"allow perm=any all : path=glob:/tmp/name[1]",
+			"/usr/bin/bash", "/tmp/name1", ALLOW,
+			"marked bracket expression"
+		},
+		{
+			"allow perm=any all : path=glob:/tmp/name\\*",
+			"/usr/bin/bash", "/tmp/name*", ALLOW,
+			"escaped wildcard in pattern"
+		},
+		{
+			"allow perm=any all : path=/no/match,glob:/home/*/bin/tool",
 			"/usr/bin/bash", "/home/alice/bin/tool", ALLOW,
 			"inline path alternatives"
+		},
+		{
+			"allow perm=any all : dir=/home/*/bin/",
+			"/usr/bin/bash", "/home/*/bin/tool", ALLOW,
+			"literal directory metacharacter"
 		},
 	};
 	char err[ERRBUF];
@@ -481,7 +528,7 @@ static void test_glob_rules(void)
 	if (rules_create(&l))
 		error(1, 0, "rules_create failed");
 	if (append_capture(&l,
-		"%wine=/home/*/.wine/drive_c/windows/notepad.exe,/opt/wine/notepad.exe",
+		"%wine=glob:/home/*/.wine/drive_c/windows/notepad.exe,/opt/wine/notepad.exe",
 		1, err, sizeof(err)))
 		error(1, 0, "glob set parse failed: %s", err);
 	if (append_capture(&l,
@@ -502,7 +549,7 @@ static void test_glob_rules(void)
 	if (rules_create(&l))
 		error(1, 0, "rules_create failed");
 	if (append_capture(&l,
-		"deny perm=any all : path=/home/*/bin/tool",
+		"deny perm=any all : path=glob:/home/*/bin/tool",
 		1, err, sizeof(err)))
 		error(1, 0, "ordered glob rule parse failed: %s", err);
 	if (append_capture(&l,

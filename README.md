@@ -225,13 +225,15 @@ the list into a sorted AVL tree so that searching is cut to a minimum number
 of compares.
 
 The `exe` and `path` rule attributes also accept `fnmatch` glob patterns for
-paths with a necessary variable component, such as
-`/opt/vendor/product-*/bin/tool`. Wildcards do not cross `/` or implicitly
-match a leading period, and `**` recursive matching is not supported. Continue
-to use `dir` for a complete subtree under a fixed directory and exact values or
-sets when the paths are known. A `dir` value containing glob metacharacters is
-a rule error reported by `fapolicyd-cli --check-rules`; use subject `exe` or
-object `path` when glob matching is required.
+paths with a necessary variable component. Prefix each pattern with `glob:`,
+as in `glob:/opt/vendor/product-*/bin/tool`, to distinguish it from an exact
+path. Unprefixed values remain exact even when their file names contain `*`,
+`?`, or `[` characters. Wildcards do not cross `/` or implicitly match a
+leading period, and `**` recursive matching is not supported. Continue to use
+`dir` for a complete subtree under a fixed directory and exact values or sets
+when the paths are known. The `glob:` prefix is a rule error on `dir` and all
+attributes other than `exe` and `path`; `fapolicyd-cli --check-rules` reports
+these errors without expanding valid patterns.
 
 A glob selects matching paths but does not trust them. In particular, it is not advisable to allow execution from a user-writable path solely because its name matches a glob. It is strongly suggested to pair an object `path` allow with object `trust=1` or an explicit `FILE_HASH`; pair a subject `exe` glob in a user-writable location with subject `trust=1`. The trust database continues to contain concrete paths; see the `fapolicyd.rules(5)` man page for the complete globbing contract.
 

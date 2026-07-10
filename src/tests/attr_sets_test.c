@@ -63,9 +63,13 @@ int main(void)
 	if (attr_set_append_str(standalone, "/usr/bin/") == 0)
 		error(1, 0, "duplicate string accepted");
 	if (attr_set_append_str(standalone, "/opt/app-*/bin/tool"))
-		error(1, 0, "glob string append failed");
+		error(1, 0, "metacharacter string append failed");
+	if (standalone->has_glob)
+		error(1, 0, "unmarked metacharacter string marked as glob");
+	if (attr_set_append_str(standalone, "glob:/opt/app-*/bin/tool"))
+		error(1, 0, "marked glob string append failed");
 	if (!standalone->has_glob)
-		error(1, 0, "glob string did not set lookup hint");
+		error(1, 0, "marked glob string did not set lookup hint");
 	attr_set_destroy(standalone);
 
 	attr_sets_destroy(sets);

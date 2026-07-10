@@ -59,8 +59,10 @@ This is a boolean describing whether it is required for the subject to be in the
 This is the shortened command name. When an interpreter starts a program, it usually renames the program to the script rather than the interpreter.
 .TP
 .B exe
-This is the full path to the executable. Exact paths and glob patterns are
-supported. See
+This is the full path to the executable. Values are exact paths unless they use
+the explicit
+.B glob:
+pattern prefix. See
 .B PATH GLOBBING
 below. You may also use the special keyword \fBuntrusted\fP to match on the
 subject not being listed in the rpm database.
@@ -133,8 +135,10 @@ The object is the file that the subject is interacting with. The fields in the r
 This matches against any obbject. When used, this must be the only object in the rule.
 .TP
 .B path
-This is the full path to the file that will be accessed. Exact paths and glob
-patterns are supported. See
+This is the full path to the file that will be accessed. Values are exact paths
+unless they use the explicit
+.B glob:
+pattern prefix. See
 .B PATH GLOBBING
 below. You may also use the special keyword \fBuntrusted\fP to match on the
 object not being listed in the rpm database.
@@ -159,23 +163,51 @@ This option matches against the hash of the file being accessed. The accepted ha
 .RE
 
 .SH PATH GLOBBING
-Glob patterns are supported only by the subject
+Rule values use exact matching by default. Prefix a value with
+.B glob:
+to request pattern matching. This explicit marker distinguishes exact paths
+from patterns, so path names containing literal
+.BR * ,
+.BR ? ,
+or
+.B [
+characters keep their historical exact-match meaning. For example,
+.B path=/tmp/name[1]
+matches only that literal path, while
+.B path=glob:/tmp/name[1]
+uses
+.B [1]
+as a bracket expression and matches
+.BR /tmp/name1 .
+
+The
+.B glob:
+prefix is supported only by the subject
 .B exe
 and object
 .B path
-attributes. The
+attributes, and the pattern after the prefix must be an absolute path. The
 .B dir
 attribute remains a literal directory prefix; use it instead of a glob when a
-rule applies to a complete subtree rooted at a fixed directory. A
+rule applies to a complete subtree rooted at a fixed directory. An unmarked
 .B dir
-value containing a glob metacharacter is rejected, including when the value
-comes from a named set. Use subject
+value containing metacharacters remains literal. A
+.B glob:
+value assigned to
+.BR dir ,
+or to any attribute other than
+.B exe
+and
+.BR path ,
+is a rule error, including when the value comes from a named set. Use subject
 .B exe
 or object
 .B path
 when glob matching is required.
 
-Patterns use
+The pattern following
+.B glob:
+uses
 .BR fnmatch (3)
 syntax. A
 .B *
@@ -200,16 +232,19 @@ must produce identical matches in every locale; use exact alternatives or
 enumerate the intended characters instead.
 
 For example,
-.B /home/*/bin/tool
+.B glob:/home/*/bin/tool
 matches
 .B /home/alice/bin/tool
 but not
 .B /home/alice/project/bin/tool
 or
 .BR /home/.admin/bin/tool .
-Glob values may appear in comma-separated attribute values and in named string
-sets. Rule order is unchanged: rules are evaluated from top to bottom, and the
-first complete rule match determines the decision.
+Each pattern in a comma-separated attribute value or named string set needs its
+own
+.B glob:
+prefix. Exact paths and patterns may be mixed in the same set. Rule order is
+unchanged: rules are evaluated from top to bottom, and the first complete rule
+match determines the decision.
 
 The concrete object
 .B path
@@ -245,8 +280,8 @@ when they express the policy because exact and prefix matching are less
 expensive than glob evaluation.
 
 .nf
-.B deny_audit perm=execute all : path=/opt/vendor/product-*/bin/tool
-.B allow perm=execute all : path=/home/*/bin/tool trust=1
+.B deny_audit perm=execute all : path=glob:/opt/vendor/product-*/bin/tool
+.B allow perm=execute all : path=glob:/home/*/bin/tool trust=1
 .fi
 
 .SH SETS

@@ -362,7 +362,8 @@ int attr_set_append_str(attr_sets_entry_t *set, const char *str)
 		free(data);
 		return 1;
 	}
-	if (strpbrk(str, "*?["))
+	/* Metacharacters are literal unless the rule explicitly opts into globbing. */
+	if (strncmp(str, ATTR_SET_GLOB_PREFIX, ATTR_SET_GLOB_PREFIX_LEN) == 0)
 		set->has_glob = true;
 
 	return 0;

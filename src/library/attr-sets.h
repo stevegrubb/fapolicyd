@@ -31,6 +31,9 @@
 
 #include "avl.h"
 
+#define ATTR_SET_GLOB_PREFIX "glob:"
+#define ATTR_SET_GLOB_PREFIX_LEN (sizeof(ATTR_SET_GLOB_PREFIX) - 1)
+
 typedef struct _avl_str_data {
 	avl_t avl;
 	size_t len;
@@ -48,7 +51,7 @@ typedef struct attr_sets_entry {
 	char * name;
 	// STRING, SIGNED, or UNSIGNED from DATA_TYPES
 	int type;
-	// Lookup hint only; rule attributes decide whether globs are meaningful.
+	// Lookup hint only; rule attributes validate whether globs are allowed.
 	bool has_glob;
 	avl_tree_t tree;
 } attr_sets_entry_t;
