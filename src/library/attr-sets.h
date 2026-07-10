@@ -48,6 +48,8 @@ typedef struct attr_sets_entry {
 	char * name;
 	// STRING, SIGNED, or UNSIGNED from DATA_TYPES
 	int type;
+	// Lookup hint only; rule attributes decide whether globs are meaningful.
+	bool has_glob;
 	avl_tree_t tree;
 } attr_sets_entry_t;
 

@@ -32,6 +32,7 @@
 #include <grp.h>
 #include <ctype.h>
 #include <stdint.h>
+#include <fnmatch.h>
 
 #include "attr-sets.h"
 #include "policy.h"
@@ -70,6 +71,35 @@ static int assign_subject(llist *l, lnode *n, int type,
 			  const char *ptr2, int lineno) __wur;
 static int assign_object(llist *l, lnode *n, int type,
 			 const char *ptr2, int lineno) __wur;
+
+/*
+ * validate_dir_set - reject glob patterns on literal directory attributes
+ * @type: parsed subject or object attribute type.
+ * @set: parsed attribute value set.
+ * @lineno: rule line number used for diagnostics.
+ * @side: rule side used to make the diagnostic actionable.
+ *
+ * Directory attributes use prefix matching rather than fnmatch. Rejecting
+ * metacharacters prevents an accepted rule from silently matching a literal
+ * asterisk, question mark, or bracket instead of the intended path pattern.
+ *
+ * Returns: 0 when the set is valid for the attribute, otherwise 1.
+ */
+static int validate_dir_set(int type, const attr_sets_entry_t *set,
+			    int lineno, const char *side)
+{
+	const char *alternative;
+
+	if ((type != EXE_DIR && type != ODIR) || !set || !set->has_glob)
+		return 0;
+
+	alternative = type == EXE_DIR ? "exe" : "path";
+	msg(LOG_ERR,
+	    "rules: line:%d: %s dir does not support glob patterns; "
+	    "use %s for glob matching",
+	    lineno, side, alternative);
+	return 1;
+}
 
 /*
  * warn_deprecated_untrusted_dir - warn about the legacy dir=untrusted macro
@@ -594,6 +624,8 @@ static int assign_subject(llist *l, lnode *n, int type,
 	} // switch
 
 finalize:
+	if (validate_dir_set(type, n->s[i].set, lineno, "subject"))
+		goto free_and_error;
 	warn_deprecated_untrusted_dir(type, n->s[i].set, lineno, "subject");
 	n->s_count++;
 	free(tmp);
@@ -745,6 +777,8 @@ static int assign_object(llist *l, lnode *n, int type,
 
 
  finalize:
+	if (validate_dir_set(type, n->o[i].set, lineno, "object"))
+		goto free_and_error;
 	warn_deprecated_untrusted_dir(type, n->o[i].set, lineno, "object");
 	n->o_count++;
 	free(tmp);
@@ -1179,6 +1213,39 @@ static int check_dirs(unsigned int i, const char *path)
 }
 
 /*
+ * path_set_match - match one concrete path against a rule string set
+ * @set: string set assigned to an exe or path rule attribute.
+ * @path: concrete executable or object path from the event.
+ *
+ * Exact lookup remains first so ordinary rules retain AVL lookup behavior and
+ * literal filenames containing metacharacters still match themselves. Globs
+ * are pathname-component scoped, case-sensitive, and require leading periods
+ * to be explicit. The event path is never changed, so trust lookup and logging
+ * continue to use the concrete path.
+ *
+ * Returns: 1 when an exact value or glob matches, otherwise 0.
+ */
+static int path_set_match(attr_sets_entry_t *set, const char *path)
+{
+	avl_iterator iterator;
+	avl_str_data_t *entry;
+
+	if (attr_set_check_str(set, path))
+		return 1;
+	if (!set || set->type != STRING || !set->has_glob || !path)
+		return 0;
+
+	for (entry = (avl_str_data_t *)avl_first(&iterator, &set->tree);
+	     entry; entry = (avl_str_data_t *)avl_next(&iterator)) {
+		if (strpbrk(entry->str, "*?[") &&
+		    fnmatch(entry->str, path, FNM_PATHNAME | FNM_PERIOD) == 0)
+			return 1;
+	}
+
+	return 0;
+}
+
+/*
  * Notes about elf program startup
  * ===============================
  * The run time linker will do the folowing:
@@ -1456,7 +1523,7 @@ static int check_subject(lnode *r, event_t *e)
 			    !is_subj_trusted(e))
 				break;
 
-			if (!attr_set_check_str(r->s[cnt].set, subj->str))
+			if (!path_set_match(r->s[cnt].set, subj->str))
 				return 0;
 
 			break;
@@ -1592,14 +1659,6 @@ static decision_t check_object(lnode *r, event_t *e)
 
 		// fall through
 
-		case PATH:
-		  // skip if fall through
-		  if (type == PATH &&
-		      legacy_untrusted_subject_path_blocked(r, cnt, e))
-			return 0;
-
-		// fall through
-
 		case DEVICE:
 		case FILE_HASH: {
 
@@ -1611,6 +1670,21 @@ static decision_t check_object(lnode *r, event_t *e)
 			}
 
 			if (!attr_set_check_str(r->o[cnt].set, obj->o))
+				return 0;
+
+			break;
+		} // case
+
+
+		case PATH: {
+			if (legacy_untrusted_subject_path_blocked(r, cnt, e))
+				return 0;
+
+			if (!obj->o)
+				break;
+
+			// Globbing changes rule selection only, never object identity.
+			if (!path_set_match(r->o[cnt].set, obj->o))
 				return 0;
 
 			break;

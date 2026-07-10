@@ -362,6 +362,8 @@ int attr_set_append_str(attr_sets_entry_t *set, const char *str)
 		free(data);
 		return 1;
 	}
+	if (strpbrk(str, "*?["))
+		set->has_glob = true;
 
 	return 0;
 }

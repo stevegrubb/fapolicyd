@@ -59,7 +59,11 @@ This is a boolean describing whether it is required for the subject to be in the
 This is the shortened command name. When an interpreter starts a program, it usually renames the program to the script rather than the interpreter.
 .TP
 .B exe
-This is the full path to the executable. Globbing is not supported. You may also use the special keyword \fBuntrusted\fP to match on the subject not being listed in the rpm database.
+This is the full path to the executable. Exact paths and glob patterns are
+supported. See
+.B PATH GLOBBING
+below. You may also use the special keyword \fBuntrusted\fP to match on the
+subject not being listed in the rpm database.
 .TP
 .B dir
 If you wish to match a directory, then use this by giving the full path to the directory. Its recommended to end with the / to ensure it matches a directory. There are 3 keywords that \fIdir\fP supports: \fBexecdirs\fP, \fBsystemdirs\fP, \fBuntrusted\fP.
@@ -129,7 +133,11 @@ The object is the file that the subject is interacting with. The fields in the r
 This matches against any obbject. When used, this must be the only object in the rule.
 .TP
 .B path
-This is the full path to the file that will be accessed. Globbing is not supported. You may also use the special keyword \fBuntrusted\fP to match on the object not being listed in the rpm database.
+This is the full path to the file that will be accessed. Exact paths and glob
+patterns are supported. See
+.B PATH GLOBBING
+below. You may also use the special keyword \fBuntrusted\fP to match on the
+object not being listed in the rpm database.
 .TP
 .B dir
 If you wish to match on access to any file in a directory, then use this by giving the full path to the directory. Its recommended to end with the / to ensure it matches a directory. There are 3 keywords that \fIdir\fP supports: \fBexecdirs\fP, \fBsystemdirs\fP, \fBuntrusted\fP. See the \fBdir\fP option under Subject for an explanation of these keywords.
@@ -149,6 +157,97 @@ This is a boolean describing whether it is required for the object to be in the 
 is still accepted)
 This option matches against the hash of the file being accessed. The accepted hash length follows the trust source, so RPM entries built with SHA512 store SHA512 digests while other sources may continue to provide SHA256. The hash in the rules should be all lowercase letters and do NOT start with 0x. Lowercase is the default output of sha256sum and sha512sum. The SHA256HASH keyword remains for compatibility but is deprecated; prefer FILE_HASH for new rules.
 .RE
+
+.SH PATH GLOBBING
+Glob patterns are supported only by the subject
+.B exe
+and object
+.B path
+attributes. The
+.B dir
+attribute remains a literal directory prefix; use it instead of a glob when a
+rule applies to a complete subtree rooted at a fixed directory. A
+.B dir
+value containing a glob metacharacter is rejected, including when the value
+comes from a named set. Use subject
+.B exe
+or object
+.B path
+when glob matching is required.
+
+Patterns use
+.BR fnmatch (3)
+syntax. A
+.B *
+matches zero or more characters,
+.B ?
+matches one character, and bracket expressions such as
+.B [0-9]
+match one character from the expression. Matching is case-sensitive and must
+cover the complete path. Wildcards do not match a slash, so each variable path
+component must be written explicitly. A wildcard does not match a leading
+period in a path component unless the period appears explicitly in the
+pattern. Backslash quotes a metacharacter. Recursive
+.B **
+globstar matching is not supported.
+
+Bracket ranges such as
+.B [a-z]
+and named character classes such as
+.B [[:alpha:]]
+use the locale active in the daemon. Avoid ranges and named classes when policy
+must produce identical matches in every locale; use exact alternatives or
+enumerate the intended characters instead.
+
+For example,
+.B /home/*/bin/tool
+matches
+.B /home/alice/bin/tool
+but not
+.B /home/alice/project/bin/tool
+or
+.BR /home/.admin/bin/tool .
+Glob values may appear in comma-separated attribute values and in named string
+sets. Rule order is unchanged: rules are evaluated from top to bottom, and the
+first complete rule match determines the decision.
+
+The concrete object
+.B path
+is obtained from the event file descriptor through
+.IR /proc/self/fd/ ,
+and the subject
+.B exe
+path is obtained through
+.IR /proc/PID/exe .
+Symbolic links have therefore already been followed, so a rule normally matches
+the reported target path rather than the symbolic link name used by the
+application. Hard links and mount aliases can expose different concrete paths
+for the same inode; policy that must cover those aliases needs an exact value or
+pattern for each reported path.
+
+Globbing selects paths; it does not expand the pattern, alter the path reported
+in logs, or make matching files trusted. Trust database entries continue to use
+concrete paths. An allow rule for a user-writable location should normally pair
+an object
+.B path
+glob with object
+.B trust=1
+or an explicit
+.B FILE_HASH
+constraint. A subject
+.B exe
+glob in a user-writable location should normally require subject
+.BR trust=1 .
+Otherwise, any file whose name fits the pattern can receive the allow decision.
+Prefer exact paths, named sets of exact paths, or
+.B dir
+when they express the policy because exact and prefix matching are less
+expensive than glob evaluation.
+
+.nf
+.B deny_audit perm=execute all : path=/opt/vendor/product-*/bin/tool
+.B allow perm=execute all : path=/home/*/bin/tool trust=1
+.fi
 
 .SH SETS
 Set is a named group of values of the same type. Fapolicyd internally distinguishes between INT and STRING set types. You can define your own set and use it as a value for a specific rule attribute. The definition is in key=value syntax and starts with a set name. The set name has to start with '%' and the rest is alphanumeric or '_'. The value is a comma separated list. The set type is inherited from the first item in the list. If that can be turned into number then whole list is expected to carry numbers. One can use these sets as a value for subject and object attributes. It is also possible to use a plain list as an attribute value without previous definition. The assigned set has to match the attribute type. It is not possible set groups for TRUST and PATTERN attributes.
@@ -202,6 +301,7 @@ The following rules illustrate the rule syntax.
 .BR fapolicyd (8),
 .B fagenrules (8),
 .BR fapolicyd-cli (8),
+.BR fnmatch (3),
 and
 .BR fapolicyd.conf (5)
 

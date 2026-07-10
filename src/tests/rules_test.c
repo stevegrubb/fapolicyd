@@ -98,6 +98,26 @@ static const struct err_case errors[] = {
 	{
 	{ "allow perm=any auid=1000 : path=/bin/ls trust=2", NULL },
 	"trust can be set to 1 or 0"
+	},
+	{
+	{ "allow perm=any dir=/home/*/bin/ : all", NULL },
+	"subject dir does not support glob patterns; use exe for glob matching"
+	},
+	{
+	{ "allow perm=any all : dir=/home/*/bin/", NULL },
+	"object dir does not support glob patterns; use path for glob matching"
+	},
+	{
+	{ "%dirs=/home/*/bin/",
+	  "allow perm=any dir=%dirs : all",
+	  NULL },
+	"subject dir does not support glob patterns; use exe for glob matching"
+	},
+	{
+	{ "%dirs=/home/*/bin/",
+	  "allow perm=any all : dir=%dirs",
+	  NULL },
+	"object dir does not support glob patterns; use path for glob matching"
 	}
 };
 
@@ -322,7 +342,183 @@ static decision_t evaluate(const llist *l, event_t *e)
 }
 
 /*
-* evaluate_pattern_rule - parse and evaluate one pattern rule
+ * evaluate_glob_rule - parse and evaluate one path-oriented rule
+ * @rule: policy rule text to parse.
+ * @exe: concrete subject executable path.
+ * @path: concrete object path.
+ *
+ * Returns: the decision produced by the parsed rule.
+ */
+static decision_t evaluate_glob_rule(const char *rule, const char *exe,
+				     const char *path)
+{
+	char err[ERRBUF];
+	llist l;
+	event_t e;
+	decision_t decision;
+
+	if (rules_create(&l))
+		error(1, 0, "rules_create failed");
+	if (append_capture(&l, rule, 1, err, sizeof(err)))
+		error(1, 0, "glob rule parse failed: %s", err);
+
+	prep_macro_event(&e, exe, path);
+	decision = evaluate(&l, &e);
+	free_event(&e);
+	rules_clear(&l);
+	return decision;
+}
+
+/*
+ * test_glob_rules - verify exe and path glob semantics
+ *
+ * Globs match whole paths without crossing directory components or matching a
+ * leading period implicitly. Exact paths, escaped metacharacters, named sets,
+ * immutable event paths, literal dir prefixes, and first-match ordering are
+ * covered alongside the positive cases.
+ *
+ * Returns: none. Exits on test failure.
+ */
+static void test_glob_rules(void)
+{
+	static const struct {
+		const char *rule;
+		const char *exe;
+		const char *path;
+		decision_t expected;
+		const char *name;
+	} cases[] = {
+		{
+			"allow perm=any all : path=/home/*/bin/tool",
+			"/usr/bin/bash", "/home/alice/bin/tool", ALLOW,
+			"object component wildcard"
+		},
+		{
+			"allow perm=any all : path=/home/*/bin/tool",
+			"/usr/bin/bash", "/home/alice/project/bin/tool",
+			NO_OPINION, "object wildcard crossed slash"
+		},
+		{
+			"allow perm=any all : path=/opt/app-?/bin/tool",
+			"/usr/bin/bash", "/opt/app-7/bin/tool", ALLOW,
+			"question wildcard"
+		},
+		{
+			"allow perm=any all : path=/opt/app-?/bin/tool",
+			"/usr/bin/bash", "/opt/app-77/bin/tool", NO_OPINION,
+			"question wildcard width"
+		},
+		{
+			"allow perm=any all : path=/srv/app-[0-9]/tool",
+			"/usr/bin/bash", "/srv/app-4/tool", ALLOW,
+			"bracket wildcard"
+		},
+		{
+			"allow perm=any all : path=/home/*/bin/tool",
+			"/usr/bin/bash", "/home/.admin/bin/tool", NO_OPINION,
+			"implicit leading period"
+		},
+		{
+			"allow perm=any all : path=/home/.*/bin/tool",
+			"/usr/bin/bash", "/home/.admin/bin/tool", ALLOW,
+			"explicit leading period"
+		},
+		{
+			"allow perm=any all : path=/home/alice/bin/*",
+			"/usr/bin/bash", "/home/alice/bin/.tool", NO_OPINION,
+			"implicit basename period"
+		},
+		{
+			"allow perm=any all : path=/home/alice/bin/.*",
+			"/usr/bin/bash", "/home/alice/bin/.tool", ALLOW,
+			"explicit basename period"
+		},
+		{
+			"allow perm=any all : path=/opt/app-*/bin/tool",
+			"/usr/bin/bash", "/opt/app-2/bin/tool.bak", NO_OPINION,
+			"whole path matching"
+		},
+		{
+			"allow perm=any exe=/opt/vendor/app-*/bin/app : all",
+			"/opt/vendor/app-2/bin/app", "/tmp/input", ALLOW,
+			"subject executable wildcard"
+		},
+		{
+			"allow perm=any exe=/opt/*/bin/app : all",
+			"/opt/vendor/release/bin/app", "/tmp/input",
+			NO_OPINION, "subject wildcard crossed slash"
+		},
+		{
+			"allow perm=any all : path=/tmp/name[1]",
+			"/usr/bin/bash", "/tmp/name[1]", ALLOW,
+			"exact metacharacter path"
+		},
+		{
+			"allow perm=any all : path=/tmp/name\\*",
+			"/usr/bin/bash", "/tmp/name*", ALLOW,
+			"escaped wildcard"
+		},
+		{
+			"allow perm=any all : path=/no/match,/home/*/bin/tool",
+			"/usr/bin/bash", "/home/alice/bin/tool", ALLOW,
+			"inline path alternatives"
+		},
+	};
+	char err[ERRBUF];
+	llist l;
+	event_t e;
+	object_attr_t *path_attr;
+
+	for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); i++) {
+		decision_t decision = evaluate_glob_rule(cases[i].rule,
+			cases[i].exe, cases[i].path);
+
+		if (decision != cases[i].expected)
+			error(1, 0, "%s produced decision %d, expected %d",
+			      cases[i].name, decision, cases[i].expected);
+	}
+
+	if (rules_create(&l))
+		error(1, 0, "rules_create failed");
+	if (append_capture(&l,
+		"%wine=/home/*/.wine/drive_c/windows/notepad.exe,/opt/wine/notepad.exe",
+		1, err, sizeof(err)))
+		error(1, 0, "glob set parse failed: %s", err);
+	if (append_capture(&l,
+		"allow perm=any all : path=%wine", 2, err, sizeof(err)))
+		error(1, 0, "glob set rule parse failed: %s", err);
+
+	prep_macro_event(&e, "/usr/bin/bash",
+			 "/home/alice/.wine/drive_c/windows/notepad.exe");
+	if (evaluate(&l, &e) != ALLOW)
+		error(1, 0, "named glob set did not match");
+	path_attr = object_access(e.o, PATH);
+	if (!path_attr || strcmp(path_attr->o,
+		    "/home/alice/.wine/drive_c/windows/notepad.exe"))
+		error(1, 0, "glob evaluation changed the concrete object path");
+	free_event(&e);
+	rules_clear(&l);
+
+	if (rules_create(&l))
+		error(1, 0, "rules_create failed");
+	if (append_capture(&l,
+		"deny perm=any all : path=/home/*/bin/tool",
+		1, err, sizeof(err)))
+		error(1, 0, "ordered glob rule parse failed: %s", err);
+	if (append_capture(&l,
+		"allow perm=any all : path=/home/alice/bin/tool",
+		2, err, sizeof(err)))
+		error(1, 0, "ordered exact rule parse failed: %s", err);
+
+	prep_macro_event(&e, "/usr/bin/bash", "/home/alice/bin/tool");
+	if (evaluate(&l, &e) != DENY)
+		error(1, 0, "glob rules did not preserve first-match ordering");
+	free_event(&e);
+	rules_clear(&l);
+}
+
+/*
+ * evaluate_pattern_rule - parse and evaluate one pattern rule
 *
 * rule: policy rule text to parse
 * state: startup-pattern state for the synthetic event
@@ -394,6 +590,7 @@ int main(void)
 	set_message_mode(MSG_STDERR, DBG_NO);
 
 	test_pattern_outcome_rules();
+	test_glob_rules();
 
 	/* positive path using fixture file */
 	if (rules_create(&l))

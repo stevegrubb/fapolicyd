@@ -6,6 +6,7 @@
 - Make fagenrules follow the generational update pattern
 - Fix Debian backend to work again
 - Add filter support for Debian backend
+- Add fnmatch globbing for exe and path rule attributes
 
 1.6
 - Many internal changes

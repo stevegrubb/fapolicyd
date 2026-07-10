@@ -54,12 +54,18 @@ int main(void)
 		error(1, 0, "standalone attr_set_create failed");
 	if (attr_set_append_str(standalone, "/usr/bin/"))
 		error(1, 0, "standalone append failed");
+	if (standalone->has_glob)
+		error(1, 0, "literal string marked as glob");
 	if (!attr_set_check_str(standalone, "/usr/bin/"))
 		error(1, 0, "standalone exact check failed");
 	if (!attr_set_check_pstr(standalone, "/usr/bin/bash"))
 		error(1, 0, "standalone prefix check failed");
 	if (attr_set_append_str(standalone, "/usr/bin/") == 0)
 		error(1, 0, "duplicate string accepted");
+	if (attr_set_append_str(standalone, "/opt/app-*/bin/tool"))
+		error(1, 0, "glob string append failed");
+	if (!standalone->has_glob)
+		error(1, 0, "glob string did not set lookup hint");
 	attr_set_destroy(standalone);
 
 	attr_sets_destroy(sets);

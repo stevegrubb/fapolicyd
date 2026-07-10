@@ -76,7 +76,7 @@ matching the \fB%languages\fP macro. A non-zero status is returned when risky
 entries are found so automated workflows can gate changes.
 .TP
 .B \-\-check-rules [path]
-Parse the rules file with the daemon policy parser without loading it into the daemon. If \fIpath\fP is omitted, the command checks the active rules file, using \fI/etc/fapolicyd/fapolicyd.rules\fP when present and \fI/etc/fapolicyd/compiled.rules\fP otherwise. If both installed rules files exist, the command reports a path configuration error unless \fB\-\-lint\fP is also used. A zero exit status means the file is valid.
+Parse the rules file with the daemon policy parser without loading it into the daemon. If \fIpath\fP is omitted, the command checks the active rules file, using \fI/etc/fapolicyd/fapolicyd.rules\fP when present and \fI/etc/fapolicyd/compiled.rules\fP otherwise. If both installed rules files exist, the command reports a path configuration error unless \fB\-\-lint\fP is also used. A zero exit status means the file is valid. Glob values for \fBexe\fP and \fBpath\fP are accepted as rule syntax, but this command does not expand them or simulate which concrete paths they match. Glob metacharacters in \fBdir\fP values are rejected.
 .TP
 .B \-\-lint
 When used with \fB\-\-check-rules\fP, also emit policy-shape warnings for executable or programmatic content that can reach the default-allow path. The option may be placed before or after \fB\-\-check-rules\fP. A warning causes a non-zero exit status.
