@@ -917,8 +917,9 @@ static void test_msg_direct_does_not_block(void)
 	set_message_mode(MSG_STDERR, DBG_NO);
 	capture_start(&cap);
 
-	/* fill the pipe with nothing reading it, so poll() inside
-	 * msg_direct() finds no room and must skip the write */
+	/* Fill the pipe with nothing reading it. msg_direct() must attempt
+	 * only a nonblocking write and return promptly.
+	 */
 	if (fcntl(STDERR_FILENO, F_SETFL, O_NONBLOCK))
 		error(1, errno, "fcntl failed");
 	while (write(STDERR_FILENO, filler, sizeof(filler)) > 0)

@@ -80,6 +80,13 @@ struct policy_snapshot {
 	char *rule_file_identity;
 };
 
+struct policy_log_record {
+	struct policy_snapshot *policy;
+	unsigned int rule_num;
+	decision_t results;
+	bool enabled;
+};
+
 /*
  * active_policy - currently published policy generation
  *
@@ -1109,17 +1116,44 @@ static void log_it(const struct policy_snapshot *policy, unsigned int num,
 	decision_timing_stage_end(&timing);
 }
 
+/*
+ * policy_log_record_emit - emit a delayed decision log record.
+ * @record: log details captured during policy evaluation.
+ * @e: event whose cached and lazy attributes are formatted.
+ *
+ * Returns nothing. Permission-event callers keep @record->policy and @e
+ * alive until this returns, then close the fanotify event fd.
+ */
+static void policy_log_record_emit(const struct policy_log_record *record,
+				   event_t *e)
+{
+	decision_timing_driver_t previous_driver;
+
+	if (record == NULL || !record->enabled)
+		return;
+
+	previous_driver = decision_timing_driver_push(
+		DECISION_TIMING_DRIVER_RESPONSE);
+	log_it(record->policy, record->rule_num, record->results, e);
+	decision_timing_driver_pop(previous_driver);
+}
 
 /*
- * process_event_with_source - evaluate policy and report decision source
+ * process_event_evaluate - evaluate policy and optionally delay logging
  * @e: event to evaluate.
  * @source: optional output receiving rule or fallthrough source.
+ * @response_timing: optional response timing span started after evaluation.
+ * @log_record: optional destination for a delayed log record.
  *
- * Returns the access decision. A no-opinion policy result remains compatible
- * with historical behavior by returning ALLOW and reporting fallthrough.
+ * Returns the access decision. When @log_record is supplied and the caller is
+ * using a pinned policy snapshot, decision logging is captured for later
+ * emission. Otherwise logging happens before a temporary policy reference is
+ * released.
  */
-decision_t process_event_with_source(event_t *e, decision_source_t *source,
-		struct decision_timing_span *response_timing)
+static decision_t process_event_evaluate(event_t *e,
+		decision_source_t *source,
+		struct decision_timing_span *response_timing,
+		struct policy_log_record *log_record)
 {
 	decision_t results = NO_OPINION;
 	decision_t decision;
@@ -1129,6 +1163,8 @@ decision_t process_event_with_source(event_t *e, decision_source_t *source,
 	lnode *r;
 	int release_policy;
 
+	if (log_record)
+		memset(log_record, 0, sizeof(*log_record));
 	if (source)
 		*source = DECISION_SOURCE_FALLTHROUGH;
 
@@ -1172,10 +1208,17 @@ decision_t process_event_with_source(event_t *e, decision_source_t *source,
 	// Output some information if debugging on or syslogging requested
 	if ( (results & SYSLOG) || (debug_mode == 1) ||
 	     (debug_mode > 1 && (results & DENY)) ) {
-		previous_driver = decision_timing_driver_push(
-			DECISION_TIMING_DRIVER_RESPONSE);
-		log_it(policy, r ? r->num : 0xFFFFFFFF, results, e);
-		decision_timing_driver_pop(previous_driver);
+		if (log_record && !release_policy) {
+			log_record->policy = policy;
+			log_record->rule_num = r ? r->num : 0xFFFFFFFF;
+			log_record->results = results;
+			log_record->enabled = true;
+		} else {
+			previous_driver = decision_timing_driver_push(
+				DECISION_TIMING_DRIVER_RESPONSE);
+			log_it(policy, r ? r->num : 0xFFFFFFFF, results, e);
+			decision_timing_driver_pop(previous_driver);
+		}
 	}
 
 	// Record which rule (rules are 1 based when listed by the cli tool)
@@ -1192,12 +1235,28 @@ decision_t process_event_with_source(event_t *e, decision_source_t *source,
 		decision = ALLOW;
 
 	/*
-	 * Release after log formatting because log_it() reads the snapshot's
-	 * syslog field array. A reload may already have published a new active
-	 * snapshot, but the old one cannot be freed until this put completes.
+	 * Non-permission callers release only after synchronous log formatting
+	 * because log_it() reads the snapshot's syslog field array. Permission
+	 * callers keep their pinned reference for delayed logging after the
+	 * fanotify response is written.
 	 */
 	policy_snapshot_end_read(policy, release_policy);
 	return decision;
+}
+
+/*
+ * process_event_with_source - evaluate policy and report decision source
+ * @e: event to evaluate.
+ * @source: optional output receiving rule or fallthrough source.
+ * @response_timing: optional response timing span started after evaluation.
+ *
+ * Returns the access decision. A no-opinion policy result remains compatible
+ * with historical behavior by returning ALLOW and reporting fallthrough.
+ */
+decision_t process_event_with_source(event_t *e, decision_source_t *source,
+		struct decision_timing_span *response_timing)
+{
+	return process_event_evaluate(e, source, response_timing, NULL);
 }
 
 /*
@@ -1259,7 +1318,18 @@ int reply_event_init(int fd)
 	return 0;
 }
 
-void reply_event(int fd, const struct fanotify_event_metadata *metadata,
+/*
+ * reply_event_write - write a fanotify response without closing event fd.
+ * @fd: fanotify listener fd used for permission responses.
+ * @metadata: permission event metadata to answer.
+ * @reply: FAN_ALLOW/FAN_DENY response bits.
+ * @e: optional event used for audit response details.
+ *
+ * Returns nothing. The caller keeps ownership of metadata->fd so post-verdict
+ * logging can still format fields that lazily inspect the file.
+ */
+static void reply_event_write(int fd,
+		const struct fanotify_event_metadata *metadata,
 		unsigned reply, event_t *e)
 {
 	struct decision_timing_span prep_timing;
@@ -1324,9 +1394,15 @@ void reply_event(int fd, const struct fanotify_event_metadata *metadata,
 		    FAILURE_REASON_RESPONSE_WRITE_FAILURE);
 	decision_timing_stage_end(&write_timing);
 out:
-	// Close this last so that no other thread can open a file which
-	// reclaims this fd number before we render a decision.
-	close(metadata->fd);
+	return;
+}
+
+void reply_event(int fd, const struct fanotify_event_metadata *metadata,
+		unsigned reply, event_t *e)
+{
+	reply_event_write(fd, metadata, reply, e);
+	if (metadata->fd >= 0)
+		close(metadata->fd);
 }
 
 /*
@@ -1377,6 +1453,8 @@ void make_policy_decision(decision_event_t *decision_event, int fd,
 	struct decision_timing_span event_timing;
 	struct decision_timing_span response_timing = { 0 };
 	decision_timing_driver_t previous_driver;
+	struct policy_log_record log_record = { 0 };
+	bool log_build_deny = false;
 
 	/*
 	 * Pin before new_event(): building subject attributes may call
@@ -1391,7 +1469,7 @@ void make_policy_decision(decision_event_t *decision_event, int fd,
 	decision_event->completed_subject_slot = DECISION_EVENT_NO_SLOT;
 	if (new_event(metadata, &e)) {
 		decision = FAN_DENY;
-		log_event_build_deny(decision_event);
+		log_build_deny = true;
 	} else {
 		decision_timing_stage_end(&event_timing);
 		metric_event = &e;
@@ -1400,8 +1478,9 @@ void make_policy_decision(decision_event_t *decision_event, int fd,
 		 * keeps the selected immutable generation alive while reload can
 		 * parse and publish a replacement without blocking decisions.
 		 */
-		decision = process_event_with_source(&e, &source,
-						     &response_timing);
+		decision = process_event_evaluate(&e, &source,
+						  &response_timing,
+						  &log_record);
 	}
 	if (metric_event == NULL)
 		decision_timing_stage_end(&event_timing);
@@ -1421,13 +1500,28 @@ void make_policy_decision(decision_event_t *decision_event, int fd,
 		// If permissive, always allow and honor the audit bit
 		// if not in debug mode
 		if (decision_config_permissive(decision_config))
-			reply_event(fd, metadata, FAN_ALLOW | (decision & AUDIT),
-					metric_event);
+			reply_event_write(fd, metadata,
+					  FAN_ALLOW | (decision & AUDIT),
+					  metric_event);
 		else
-			reply_event(fd, metadata, decision & FAN_RESPONSE_MASK,
-					metric_event);
+			reply_event_write(fd, metadata,
+					  decision & FAN_RESPONSE_MASK,
+					  metric_event);
 		decision_timing_driver_pop(previous_driver);
 	}
+	/*
+	 * The kernel verdict is already written. Emit decision logs only after
+	 * that point so logging cannot stop the response needed by journald,
+	 * rsyslog, or another logging component. Keep metadata->fd open until
+	 * logging finishes because syslog_format fields may lazily resolve path,
+	 * MIME, trust, or hash data from it.
+	 */
+	if (log_build_deny)
+		log_event_build_deny(decision_event);
+	else
+		policy_log_record_emit(&log_record, &e);
+	if (metadata->fd >= 0)
+		close(metadata->fd);
 	decision_timing_stage_end(&response_timing);
 
 	if (decision_event->subject_slot != DECISION_EVENT_NO_SLOT &&

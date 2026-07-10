@@ -27,7 +27,6 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
-#include <sched.h>
 #include <semaphore.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -69,14 +68,31 @@ static sem_t log_sem;
 static pthread_t log_thread;
 static atomic_int log_state = ATOMIC_VAR_INIT(LOG_ASYNC_OFF);
 static atomic_ulong log_dropped = ATOMIC_VAR_INIT(0);
-/* producers currently inside log_enqueue() */
-static atomic_uint log_inflight = ATOMIC_VAR_INIT(0);
 static struct message_rate_limit log_drop_limit = MESSAGE_RATE_LIMIT_INIT(30);
 
 struct message_level {
 	const char *name;
 	const char *color;
 };
+
+#ifdef __GNUC__
+#define MESSAGE_PRINTF(fmt, args) __attribute__ ((format (printf, fmt, args)))
+#else
+#define MESSAGE_PRINTF(fmt, args)
+#endif
+
+static void msg_stderr(int priority, const char *fmt, va_list ap)
+	MESSAGE_PRINTF(2, 0);
+static void msg_stderr_f(int priority, const char *fmt, ...)
+	MESSAGE_PRINTF(2, 3);
+static void nonblocking_stderr(int priority, const char *fmt, va_list ap)
+	MESSAGE_PRINTF(2, 0);
+static void nonblocking_syslog(int priority, const char *fmt, va_list ap)
+	MESSAGE_PRINTF(2, 0);
+static void msg_direct_deliver(int priority, const char *fmt, va_list ap)
+	MESSAGE_PRINTF(2, 0);
+static void log_enqueue(int priority, const char *fmt, va_list ap)
+	MESSAGE_PRINTF(2, 0);
 
 /*
  * message_level_info - return display metadata for one syslog priority.
@@ -202,19 +218,64 @@ static void log_write(int priority, const char *text)
 		msg_stderr_f(priority, "%s", text);
 }
 
-/* deliver to stderr without ever blocking: a poll() check doesn't bound how
- * much the message could grow, so the fd itself is switched to O_NONBLOCK
- * for the write instead, which is safe regardless of message size */
+/* nonblocking_stderr - emit one best-effort stderr record without stdio locks.
+ * Returns nothing. Full pipes/sockets and formatting failures drop the record.
+ */
 static void nonblocking_stderr(int priority, const char *fmt, va_list ap)
 {
+	struct message_level level = message_level_info(priority);
+	time_t rawtime = time(NULL);
+	struct tm timeinfo;
+	char timebuf[80];
+	char body[LOG_SLOT_SIZE];
+	char record[LOG_SLOT_SIZE + 128];
+	const char *time_prefix = "time unavailable [ ";
 	int flags = fcntl(STDERR_FILENO, F_GETFL);
+	int body_len;
+	int record_len;
 
 	if (flags == -1)
 		return;
+	body_len = vsnprintf(body, sizeof(body), fmt, ap);
+	if (body_len < 0)
+		return;
+	if ((size_t)body_len >= sizeof(body))
+		body_len = sizeof(body) - 1;
+	if (rawtime != (time_t)-1 &&
+	    localtime_r(&rawtime, &timeinfo) != NULL &&
+	    strftime(timebuf, sizeof(timebuf), "%x %T [ ", &timeinfo) != 0)
+		time_prefix = timebuf;
+	record_len = snprintf(record, sizeof(record), "%s%s ]: %.*s\n",
+			      time_prefix, level.name, body_len, body);
+	if (record_len < 0)
+		return;
+	if ((size_t)record_len >= sizeof(record))
+		record_len = sizeof(record) - 1;
 	if (fcntl(STDERR_FILENO, F_SETFL, flags | O_NONBLOCK) == -1)
 		return;
-	msg_stderr(priority, fmt, ap);
+	write(STDERR_FILENO, record, (size_t)record_len);
 	fcntl(STDERR_FILENO, F_SETFL, flags);
+}
+
+/* open_log_socket - connect a nonblocking datagram socket to syslog.
+ * Returns a connected descriptor, or -1 on failure.
+ */
+static int open_log_socket(void)
+{
+	struct sockaddr_un addr;
+	int fd;
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	strncpy(addr.sun_path, _PATH_LOG, sizeof(addr.sun_path) - 1);
+
+	fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+	if (fd != -1 && connect(fd, (struct sockaddr *)&addr,
+				sizeof(addr)) == -1) {
+		close(fd);
+		fd = -1;
+	}
+	return fd;
 }
 
 /* deliver to syslog without ever blocking. vsyslog() has no non-blocking
@@ -223,27 +284,11 @@ static void nonblocking_stderr(int priority, const char *fmt, va_list ap)
  * instead; any failure is silently dropped, never retried/waited on */
 static void nonblocking_syslog(int priority, const char *fmt, va_list ap)
 {
-	static int log_fd = -1;
+	static atomic_int log_fd = ATOMIC_VAR_INIT(-1);
 	char text[LOG_SLOT_SIZE];
 	char packet[LOG_SLOT_SIZE + 64];
+	int fd;
 	int n;
-
-	if (log_fd == -1) {
-		struct sockaddr_un addr;
-
-		memset(&addr, 0, sizeof(addr));
-		addr.sun_family = AF_UNIX;
-		strncpy(addr.sun_path, _PATH_LOG, sizeof(addr.sun_path) - 1);
-
-		log_fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK, 0);
-		if (log_fd != -1 && connect(log_fd, (struct sockaddr *)&addr,
-					    sizeof(addr)) == -1) {
-			close(log_fd);
-			log_fd = -1;
-		}
-	}
-	if (log_fd == -1)
-		return;
 
 	n = vsnprintf(text, sizeof(text), fmt, ap);
 	if (n < 0)
@@ -259,7 +304,23 @@ static void nonblocking_syslog(int priority, const char *fmt, va_list ap)
 	if ((size_t)n >= sizeof(packet))
 		n = sizeof(packet) - 1;
 
-	send(log_fd, packet, (size_t)n, MSG_DONTWAIT);
+	fd = atomic_load_explicit(&log_fd, memory_order_relaxed);
+	if (fd == -1) {
+		int newfd = open_log_socket();
+		int expected = -1;
+
+		if (newfd == -1)
+			return;
+		if (atomic_compare_exchange_strong_explicit(&log_fd, &expected,
+				newfd, memory_order_relaxed, memory_order_relaxed))
+			fd = newfd;
+		else {
+			close(newfd);
+			fd = expected;
+		}
+	}
+	if (fd != -1)
+		send(fd, packet, (size_t)n, MSG_DONTWAIT);
 }
 
 /* best-effort, non-blocking delivery shared by msg_direct() and by msg()
@@ -274,8 +335,8 @@ static void msg_direct_deliver(int priority, const char *fmt, va_list ap)
 
 /*
  * msg_direct - log a message immediately, best-effort and non-blocking,
- * bypassing the async queue entirely. For callers that can't rely on (or
- * must not touch) the drain thread - e.g. the crash handler.
+ * bypassing the async queue entirely. For callers that cannot rely on the
+ * drain thread.
  */
 void msg_direct(int priority, const char *fmt, ...)
 {
@@ -293,14 +354,31 @@ void msg_direct(int priority, const char *fmt, ...)
 
 static void log_enqueue(int priority, const char *fmt, va_list ap)
 {
-	/* log_lock is ERRORCHECK: a fatal-signal handler can call msg() while
-	 * this thread already holds it, and relocking must fail, not hang */
-	if (pthread_mutex_lock(&log_lock) == EDEADLK) {
+	struct log_slot slot;
+	unsigned tail;
+	int n;
+
+	slot.priority = priority;
+	n = vsnprintf(slot.text, LOG_SLOT_SIZE, fmt, ap);
+	if (n < 0) {
+		slot.text[0] = 0;
+		n = 0;
+	} else if (n >= LOG_SLOT_SIZE) {
+		static const char mark[] = " [truncated]";
+
+		memcpy(slot.text + LOG_SLOT_SIZE - sizeof(mark), mark,
+		       sizeof(mark));
+		n = LOG_SLOT_SIZE - 1;
+	}
+	slot.len = (size_t)n;
+
+	if (pthread_mutex_lock(&log_lock)) {
 		atomic_fetch_add_explicit(&log_dropped, 1,
 					  memory_order_relaxed);
 		return;
 	}
-	if (log_count == LOG_QUEUE_DEPTH) {
+	if (atomic_load_explicit(&log_state, memory_order_relaxed) !=
+	    LOG_ASYNC_RUNNING || log_count == LOG_QUEUE_DEPTH) {
 		pthread_mutex_unlock(&log_lock);
 		/* can't report via msg(): that would re-enter this same
 		 * full queue and just drop the report too */
@@ -308,20 +386,9 @@ static void log_enqueue(int priority, const char *fmt, va_list ap)
 					  memory_order_relaxed);
 		return;
 	}
-	unsigned tail = (log_head + log_count) % LOG_QUEUE_DEPTH;
+	tail = (log_head + log_count) % LOG_QUEUE_DEPTH;
 
-	log_ring[tail].priority = priority;
-	int n = vsnprintf(log_ring[tail].text, LOG_SLOT_SIZE, fmt, ap);
-	if (n < 0)
-		n = 0;
-	else if (n >= LOG_SLOT_SIZE) {
-		static const char mark[] = " [truncated]";
-
-		memcpy(log_ring[tail].text +
-		       LOG_SLOT_SIZE - sizeof(mark), mark, sizeof(mark));
-		n = LOG_SLOT_SIZE - 1;
-	}
-	log_ring[tail].len = (size_t)n;
+	log_ring[tail] = slot;
 	log_count++;
 	/* post while still holding the lock so stop() can't destroy log_sem
 	 * before this post lands */
@@ -377,7 +444,7 @@ static void *log_thread_main(void *arg)
 			dropped = atomic_exchange_explicit(&log_dropped, 0,
 						memory_order_relaxed);
 			snprintf(note, sizeof(note),
-				 "Dropped %lu messages - log queue full",
+				 "Dropped %lu messages - log queue unavailable",
 				 dropped);
 			log_write(LOG_WARNING, note);
 		}
@@ -417,17 +484,13 @@ void message_async_stop(void)
 				 memory_order_relaxed) != LOG_ASYNC_RUNNING)
 		return;
 
-	/* flip to STOPPING under log_lock so no producer can start a fresh
-	 * sem_post() after we decide it's safe to tear the queue down */
+	/* Producers recheck log_state while holding log_lock, so no enqueue can
+	 * start after this transition reaches LOG_ASYNC_STOPPING.
+	 */
 	pthread_mutex_lock(&log_lock);
 	atomic_store_explicit(&log_state, LOG_ASYNC_STOPPING,
 			      memory_order_release);
 	pthread_mutex_unlock(&log_lock);
-
-	/* wait for any producer already inside log_enqueue() to finish
-	 * before destroying log_sem */
-	while (atomic_load(&log_inflight) != 0)
-		sched_yield();
 
 	sem_post(&log_sem);
 
@@ -467,16 +530,10 @@ void msg(int priority, const char *fmt, ...)
 		return;
 
 	va_start(ap, fmt);
-	/* register before checking log_state, so message_async_stop() can
-	 * rely on log_inflight == 0 as proof no producer is mid-enqueue */
-	atomic_fetch_add(&log_inflight, 1);
 	if (atomic_load_explicit(&log_state, memory_order_relaxed) ==
-	    LOG_ASYNC_RUNNING) {
+	    LOG_ASYNC_RUNNING)
 		log_enqueue(priority, fmt, ap);
-		atomic_fetch_sub(&log_inflight, 1);
-	} else {
-		atomic_fetch_sub(&log_inflight, 1);
+	else
 		msg_direct_deliver(priority, fmt, ap);
-	}
 	va_end(ap);
 }
