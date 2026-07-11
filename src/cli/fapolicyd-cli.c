@@ -99,6 +99,7 @@ static const char *usage =
 "-f, --file cmd path   Manage the file trust database\n"
 "-h, --help            Prints this help message\n"
 "-t, --ftype file-path Prints out the mime type of a file\n"
+"-T, --ftype-ext file-path Prints the file path along with its mime type\n"
 "-l, --list            Prints a list of the daemon's rules with numbers\n"
 "-r, --reload-rules    Notifies fapolicyd to perform reload of rules\n"
 "-y, --yes             Do not prompt before a manual metrics reset\n"
@@ -134,6 +135,7 @@ static struct option long_opts[] =
 	{"file",	1, NULL, 'f'},
 	{"help",	0, NULL, 'h'},
 	{"ftype",	1, NULL, 't'},
+	{"ftype-ext",	1, NULL, 'T'},
 	{"list",	0, NULL, 'l'},
 	{"update",	0, NULL, 'u'},
 	{"reload-rules",	0, NULL, 'r'},
@@ -463,7 +465,7 @@ static int do_manage_files(int argc, char * const argv[])
 }
 
 
-static int do_ftype(const char *path)
+static int do_ftype(const char *path, bool print_path)
 {
 	int fd;
 	const char *ptr = NULL;
@@ -498,7 +500,9 @@ static int do_ftype(const char *path)
 	file_close();
 	close(fd);
 
-	if (ptr)
+	if (print_path)
+		printf("%s: %s\n", path, ptr ? ptr : "unknown");
+	else if (ptr)
 		printf("%s\n", ptr);
 	else
 		printf("unknown\n");
@@ -1372,7 +1376,7 @@ static int run_cli_command(int arg_count, char **args)
 
 	/* Run getopt_long on the sanitized copy so command parsing behaves
 	 * exactly as before --verbose was introduced. */
-	opt = getopt_long(arg_count, (char * const *)args, "Ddf:ht:lury",
+	opt = getopt_long(arg_count, (char * const *)args, "Ddf:ht:T:lury",
 				 long_opts, &option_index);
 
 	if (assume_yes && opt != 11)
@@ -1409,11 +1413,12 @@ static int run_cli_command(int arg_count, char **args)
 		rc = CLI_EXIT_SUCCESS;
 		break;
 	case 't':
+	case 'T':
 		if (lint_rules)
 			goto args_err;
 		if (arg_count > 3)
 			goto args_err;
-		rc = do_ftype(optarg);
+		rc = do_ftype(optarg, opt == 'T');
 		break;
 	case 'l':
 		if (lint_rules)

@@ -182,6 +182,9 @@ Evaluate the filter configuration against the given path and emit a rule-by-rule
 .B \-t, \-\-ftype /path/to/file
 Prints the mime type of the file given. A full path must be specified. This command is intended to help get the ftype parameter of rules correct by seeing how fapolicyd will classify it. Fapolicyd may differ from the \fBfile\fP command.
 .TP
+.B \-T, \-\-ftype-ext /path/to/file
+Prints the path followed by a colon and the mime type of the file given. This is an opt-in variant of \fB\-\-ftype\fP intended for scripts that need the path and the fapolicyd MIME type on the same line.
+.TP
 .B \-l, \-\-list
 Prints a listing of the fapolicyd rules file with a rule number to aid in troubleshooting or understanding of the debug messages.
 .TP

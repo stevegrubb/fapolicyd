@@ -11,10 +11,10 @@ _fapolicydcli()
 	opts="--check-config --check-path --check-rules --check-status --check-metrics \
 		--check-trustdb --compact-trustdb --check-watch_fs --check-ignore_mounts \
 		--delete-db --dump-db \
-		--file --filter --ftype --help --list --update --reload-rules \
+		--file --filter --ftype --ftype-ext --help --list --update --reload-rules \
 		--reset-metrics --timing-start --timing-stop --timer-start \
 		--timer-stop --test-filter \
-		--trust-file --lint --verbose --yes -h -d -D -f -t -l -u -r -y"
+		--trust-file --lint --verbose --yes -h -d -D -f -t -T -l -u -r -y"
 
 	# Handle file management subcommands specially so we can complete file paths
 	local file_mode=false subcmd="" have_path=0 filter_used=0 trust_used=0
@@ -81,7 +81,7 @@ _fapolicydcli()
 	fi
 
 	case $prev in
-		--ftype|-t|--test-filter)
+		--ftype|-t|--ftype-ext|-T|--test-filter)
 			# If bash completions is installed, use it
 			if [ -e /usr/share/bash-completion/bash_completion ] ; then
 				_filedir
