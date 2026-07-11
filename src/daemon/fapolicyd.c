@@ -1275,15 +1275,9 @@ int main(int argc, const char *argv[])
 		openlog("fapolicyd", LOG_PID, LOG_DAEMON);
 	}
 
-	/* started after the possible fork() above: a pthread doesn't
-	 * survive fork(), so the drain thread must live in the process
-	 * that actually keeps running */
-	rc = message_async_start();
-	if (rc) {
-		msg(LOG_ERR, "failed starting async logging thread (%s)",
-		    strerror(rc));
-		exit(1);
-	}
+	/* Keep this before unlink_fifo so shutdown retains its existing order.
+	 * message_async_stop() is a safe no-op until the logger starts below.
+	 */
 	if (atexit(message_async_stop)) {
 		msg(LOG_ERR, "cannot register async log exit handler");
 		exit(1);
@@ -1330,6 +1324,16 @@ int main(int argc, const char *argv[])
 
 	// Install seccomp filter to prevent escalation
 	install_syscall_filter();
+
+	// Start after daemonizing and installing seccomp. This create a new
+	// thread. When seccomp is involved, it must be started after the
+	// filter is installed so that it inherits the filter.
+	rc = message_async_start();
+	if (rc) {
+		msg(LOG_ERR, "failed starting async logging thread (%s)",
+		    strerror(rc));
+		exit(1);
+	}
 
 	// Setup lru caches
 	if (init_event_system(&config)) {
