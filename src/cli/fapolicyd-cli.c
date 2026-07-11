@@ -99,7 +99,7 @@ static const char *usage =
 "-f, --file cmd path   Manage the file trust database\n"
 "-h, --help            Prints this help message\n"
 "-t, --ftype file-path Prints out the mime type of a file\n"
-"-T, --ftype-ext file-path Prints the file path along with its mime type\n"
+"-T, --ftype-ext file-path Emit NUL-delimited path and mime type\n"
 "-l, --list            Prints a list of the daemon's rules with numbers\n"
 "-r, --reload-rules    Notifies fapolicyd to perform reload of rules\n"
 "-y, --yes             Do not prompt before a manual metrics reset\n"
@@ -500,8 +500,13 @@ static int do_ftype(const char *path, bool print_path)
 	file_close();
 	close(fd);
 
-	if (print_path)
-		printf("%s: %s\n", path, ptr ? ptr : "unknown");
+	if (print_path) {
+		/* Keep pathname bytes from creating synthetic output records. */
+		fputs(path, stdout);
+		fputc('\0', stdout);
+		fputs(ptr ? ptr : "unknown", stdout);
+		fputc('\0', stdout);
+	}
 	else if (ptr)
 		printf("%s\n", ptr);
 	else

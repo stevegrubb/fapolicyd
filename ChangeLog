@@ -10,7 +10,7 @@
 - Fix logging to syslog/journald to not deadlock on log rotation
 - Allow rules to express file/dir names with spaces using double quotes
 - Allow packages to append MIME types to the %languages policy set
-- fapolicyd-cli now has --ftype-ext which also prints the path
+- fapolicyd-cli now has --ftype-ext emits NUL-delimited path and MIME pairs
 
 1.6
 - Many internal changes

@@ -183,7 +183,23 @@ Evaluate the filter configuration against the given path and emit a rule-by-rule
 Prints the mime type of the file given. A full path must be specified. This command is intended to help get the ftype parameter of rules correct by seeing how fapolicyd will classify it. Fapolicyd may differ from the \fBfile\fP command.
 .TP
 .B \-T, \-\-ftype-ext /path/to/file
-Prints the path followed by a colon and the mime type of the file given. This is an opt-in variant of \fB\-\-ftype\fP intended for scripts that need the path and the fapolicyd MIME type on the same line.
+Writes two NUL-terminated fields to standard output: the supplied path followed by the fapolicyd MIME type. Each invocation writes one path/MIME pair. This binary output is intended for scripts; use \fB\-\-ftype\fP for interactive, MIME-only output.
+.PP
+The following Bash example reads one or more path/MIME pairs safely:
+.RS
+.nf
+for file in "$@"; do
+        fapolicyd-cli --ftype-ext="$file"
+done |
+while IFS= read -r -d '' path &&
+      IFS= read -r -d '' mime
+do
+        printf 'path=%q mime=%q\\n' "$path" "$mime"
+done
+.fi
+.RE
+.PP
+A pathname component may contain every byte except NUL and slash, including spaces, tabs, newlines, quotes, backslashes, glob characters, leading hyphens, colons, and terminal control sequences. NUL field framing prevents those bytes from creating additional output records, but does not make them safe for shell evaluation or terminal display. Do not use command substitution, unquoted expansions, \fBeval\fP, or newline-delimited file lists for these values. Use quoted variables when passing paths to commands, and use \fBfind -print0\fP with the same NUL-aware read pattern when discovering paths. The Bash \fB%q\fP conversion in the example renders values safely for a terminal.
 .TP
 .B \-l, \-\-list
 Prints a listing of the fapolicyd rules file with a rule number to aid in troubleshooting or understanding of the debug messages.
