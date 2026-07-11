@@ -35,7 +35,7 @@ The subject is the process that is performing actions on system resources. The f
 This matches against any subject. When used, this must be the only subject in the rule.
 .TP
 .B auid
-This is the login uid that the audit system assigns users when they log in to the system. Daemons have a value of -1. The given value may be numeric or the account name.
+This is the login uid that the audit system assigns users when they log in to the system. When the audit login uid is unset, as is common for system daemons and kernel threads, the kernel value is -1 and fapolicyd reports it as 4294967295. The auid attribute is unsigned, so rules must use \fBauid=4294967295\fR; \fBauid=-1\fR is invalid. The given value may otherwise be numeric or the account name.
 .TP
 .B uid
 This is the user id that the program is running under. The given value may be numeric or the account name.

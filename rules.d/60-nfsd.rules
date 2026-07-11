@@ -1,0 +1,9 @@
+# Allow NFS clients to open exported content through the kernel NFS server.
+#
+# nfsd is a kernel thread, not an executable, so it cannot be added to the
+# fapolicyd trust database.  Kernel threads have PPID 2; pairing that with
+# nfsd's comm value prevents a user-space process named nfsd from matching.
+# This deliberately permits only open events.  NFS export rules and file
+# permissions remain responsible for authorizing the remote client.
+
+allow perm=open ppid=2 comm=nfsd : all

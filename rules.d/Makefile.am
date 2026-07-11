@@ -26,7 +26,7 @@ CONFIG_CLEAN_FILES = *.rej *.orig
 EXTRA_DIST = README-rules 10-languages.rules 20-dracut.rules \
 	21-updaters.rules 22-buildroot.rules 30-patterns.rules \
 	40-bad-elf.rules 41-shared-obj.rules 42-trusted-elf.rules \
-	43-known-elf.rules \
+	43-known-elf.rules 60-nfsd.rules \
 	70-trusted-lang.rules 71-known-python.rules 72-shell.rules \
 	73-known-perl.rules 74-known-ocaml.rules 75-known-php.rules \
 	76-known-ruby.rules 77-known-lua.rules \
@@ -34,4 +34,3 @@ EXTRA_DIST = README-rules 10-languages.rules 20-dracut.rules \
 
 rulesdir = $(datadir)/fapolicyd/sample-rules
 dist_rules_DATA = $(EXTRA_DIST)
-

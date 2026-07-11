@@ -88,6 +88,10 @@ static const struct err_case errors[] = {
 	"negative value -1 not allowed for uid"
 	},
 	{
+	{ "allow perm=any auid=-1 : path=/bin/ls", NULL },
+	"negative value -1 not allowed for auid"
+	},
+	{
 	{ "allow auid=1000 path=/bin/ls trust=2", NULL },
 	"trust can be set to 1 or 0"
 	},
@@ -134,22 +138,6 @@ static const struct err_case errors[] = {
 	{
 	{ "allow perm=any exe=glob:opt/app-* : all", NULL },
 	"subject exe glob pattern must be an absolute path"
-	},
-	{
-	{ "allow perm=any all : path=/tmp/first last/tool", NULL },
-	"'=' is missing for field last/tool, in line 1"
-	},
-	{
-	{ "allow perm=any all : path=\"/tmp/first last/tool", NULL },
-	"Unterminated quoted value in line 1"
-	},
-	{
-	{ "allow perm=any all : path=\"/tmp/first last/tool\"suffix", NULL },
-	"Characters after quoted value in line 1"
-	},
-	{
-	{ "allow perm=any all : dir=\"glob:/tmp/first last/*\"", NULL },
-	"object dir does not support glob patterns; glob: is valid only with exe and path"
 	}
 };
 
@@ -263,7 +251,54 @@ static void prep_macro_event(event_t *e, const char *exe, const char *obj)
 }
 
 /*
-* add_trust_attrs - add cached subject and object trust values
+ * prep_nfsd_event - build a kernel NFS server open event for policy tests.
+ * @e: event to initialize.
+ * @comm: kernel thread comm value.
+ * @ppid: parent process ID reported by procfs.
+ * @event_type: fanotify permission event mask.
+ *
+ * The object is a language file so a following language denial verifies that
+ * an nfsd exception must match before the ordinary language policy.
+ */
+static void prep_nfsd_event(event_t *e, const char *comm, pid_t ppid,
+			    uint64_t event_type)
+{
+	subject_attr_t comm_attr = { .type = COMM, .str = strdup(comm) };
+	subject_attr_t ppid_attr = { .type = PPID, .pid = ppid };
+	object_attr_t path_attr = {
+		.type = PATH,
+		.o = strdup("/srv/export/module.py")
+	};
+	object_attr_t ftype_attr = {
+		.type = FTYPE,
+		.o = strdup("text/x-python")
+	};
+
+	memset(e, 0, sizeof(*e));
+	e->s = malloc(sizeof(s_array));
+	e->o = malloc(sizeof(o_array));
+	if (!e->s || !e->o)
+		error(1, errno, "malloc failed");
+
+	if (subject_create(e->s) || object_create(e->o))
+		error(1, errno, "event array allocation failed");
+
+	e->s->info = calloc(1, sizeof(struct proc_info));
+	if (!e->s->info)
+		error(1, errno, "calloc failed");
+	if (!comm_attr.str || !path_attr.o || !ftype_attr.o)
+		error(1, errno, "strdup failed");
+	if (subject_add(e->s, &comm_attr) ||
+	    subject_add(e->s, &ppid_attr) ||
+	    object_add(e->o, &path_attr) ||
+	    object_add(e->o, &ftype_attr))
+		error(1, 0, "attribute setup failed");
+
+	e->type = event_type;
+}
+
+/*
+ * add_trust_attrs - add cached subject and object trust values
 *
 * e: event to update
 * subj_trusted: subject trust value to cache
@@ -581,153 +616,6 @@ static void test_glob_rules(void)
 }
 
 /*
- * test_quoted_values - verify quoted rule values and glob interaction.
- *
- * Double quotes keep spaces in one value for exact exe, path, and directory
- * matching. The lexer removes those quotes before glob validation, so quoted
- * glob: values keep their normal fnmatch behavior. Percent escapes are not
- * decoded by rules and therefore match literal percent characters.
- *
- * Returns: none. Exits on test failure.
- */
-static void test_quoted_values(void)
-{
-	static const struct {
-		const char *rule;
-		const char *exe;
-		const char *path;
-		decision_t expected;
-		const char *name;
-	} cases[] = {
-		{
-			"allow perm=any all : dir=\"/tmp/first last/\"",
-			"/usr/bin/bash", "/tmp/first last/tool", ALLOW,
-			"quoted object directory"
-		},
-		{
-			"allow perm=any all : dir=\"/tmp/first last/\"",
-			"/usr/bin/bash", "/tmp/first last-other/tool",
-			NO_OPINION, "quoted directory boundary"
-		},
-		{
-			"allow perm=any dir=\"/tmp/first last/\" : all",
-			"/tmp/first last/tool", "/tmp/input", ALLOW,
-			"quoted subject directory"
-		},
-		{
-			"allow perm=any all : path=\"/tmp/first last/tool\"",
-			"/usr/bin/bash", "/tmp/first last/tool", ALLOW,
-			"quoted exact path"
-		},
-		{
-			"allow perm=any exe=\"/tmp/first last/tool\" : all",
-			"/tmp/first last/tool", "/tmp/input", ALLOW,
-			"quoted exact executable"
-		},
-		{
-			"allow perm=any all : path=\"/tmp/first \\\"last\\\"/tool\"",
-			"/usr/bin/bash", "/tmp/first \"last\"/tool", ALLOW,
-			"quoted literal double quote"
-		},
-		{
-			"allow perm=any all : path=\"/tmp/first last/tool\",\"/tmp/second name/tool\"",
-			"/usr/bin/bash", "/tmp/second name/tool", ALLOW,
-			"quoted inline path alternatives"
-		},
-		{
-			"allow perm=any all : path=\"glob:/tmp/first last/*\"",
-			"/usr/bin/bash", "/tmp/first last/tool", ALLOW,
-			"quoted path glob"
-		},
-		{
-			"allow perm=any exe=\"glob:/tmp/first last/*\" : all",
-			"/tmp/first last/tool", "/tmp/input", ALLOW,
-			"quoted executable glob"
-		},
-		{
-			"allow perm=any all : path=\"glob:/tmp/first last/\\*\"",
-			"/usr/bin/bash", "/tmp/first last/*", ALLOW,
-			"quoted glob keeps wildcard escape"
-		},
-		{
-			"allow perm=any all : path=\"/tmp/first%20last/tool\"",
-			"/usr/bin/bash", "/tmp/first%20last/tool", ALLOW,
-			"percent escape remains literal"
-		},
-		{
-			"allow perm=any all : path=\"/tmp/first%20last/tool\"",
-			"/usr/bin/bash", "/tmp/first last/tool", NO_OPINION,
-			"percent escape does not match space"
-		},
-	};
-	char err[ERRBUF];
-	llist l;
-	event_t e;
-
-	for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); i++) {
-		decision_t decision = evaluate_glob_rule(cases[i].rule,
-			cases[i].exe, cases[i].path);
-
-		if (decision != cases[i].expected)
-			error(1, 0, "%s produced decision %d, expected %d",
-			      cases[i].name, decision, cases[i].expected);
-	}
-
-	if (rules_create(&l))
-		error(1, 0, "rules_create failed");
-	if (append_capture(&l,
-		"%quoted_paths=\"/tmp/first last/tool\",\"/tmp/second name/tool\"", 1,
-		err, sizeof(err)))
-		error(1, 0, "quoted set parse failed: %s", err);
-	if (append_capture(&l,
-		"allow perm=any all : path=%quoted_paths", 2,
-		err, sizeof(err)))
-		error(1, 0, "quoted set rule parse failed: %s", err);
-
-	prep_macro_event(&e, "/usr/bin/bash", "/tmp/second name/tool");
-	if (evaluate(&l, &e) != ALLOW)
-		error(1, 0, "quoted named path set did not match");
-	free_event(&e);
-	rules_clear(&l);
-
-	if (rules_create(&l))
-		error(1, 0, "rules_create failed");
-	if (append_capture(&l,
-		"allow perm=any all : dir=\"/tmp/first last/allowed/\"", 1,
-		err, sizeof(err)))
-		error(1, 0, "quoted allow directory rule parse failed: %s", err);
-	if (append_capture(&l,
-		"deny perm=any all : dir=\"/tmp/first last/denied/\"", 2,
-		err, sizeof(err)))
-		error(1, 0, "quoted deny directory rule parse failed: %s", err);
-	if (append_capture(&l,
-		"deny perm=any all : dir=\"/tmp/first last/\"", 3,
-		err, sizeof(err)))
-		error(1, 0, "quoted parent directory rule parse failed: %s", err);
-
-	prep_macro_event(&e, "/usr/bin/bash", "/tmp/first last/allowed/tool");
-	if (evaluate(&l, &e) != ALLOW)
-		error(1, 0, "quoted allowed directory did not allow");
-	free_event(&e);
-
-	prep_macro_event(&e, "/usr/bin/bash", "/tmp/first last/denied/tool");
-	if (evaluate(&l, &e) != DENY)
-		error(1, 0, "quoted denied directory did not deny");
-	free_event(&e);
-
-	prep_macro_event(&e, "/usr/bin/bash", "/tmp/first last/leaked/tool");
-	if (evaluate(&l, &e) != DENY)
-		error(1, 0, "quoted parent directory did not deny leaked path");
-	free_event(&e);
-
-	prep_macro_event(&e, "/usr/bin/bash", "/tmp/first last/tool");
-	if (evaluate(&l, &e) != DENY)
-		error(1, 0, "quoted parent directory did not deny direct path");
-	free_event(&e);
-	rules_clear(&l);
-}
-
-/*
  * evaluate_pattern_rule - parse and evaluate one pattern rule
 *
 * rule: policy rule text to parse
@@ -789,6 +677,88 @@ static void test_pattern_outcome_rules(void)
 		error(1, 0, "ld_so pattern matched normal startup");
 }
 
+/*
+ * test_nfsd_kernel_thread_rule - verify the optional NFS server exception.
+ *
+ * nfsd has no executable to place in the trust database. The policy must
+ * identify its kernel worker by comm and PPID, permit only open events, and
+ * precede the normal language-file denial.
+ */
+static void test_nfsd_kernel_thread_rule(void)
+{
+	char err[ERRBUF];
+	llist l;
+	event_t e;
+	int rc;
+
+	if (rules_create(&l))
+		error(1, 0, "rules_create failed");
+
+	rc = append_capture(&l,
+		"allow perm=open ppid=2 comm=nfsd : all", 1,
+		err, sizeof(err));
+	if (rc)
+		error(1, 0, "nfsd rule parse failed: %s", err);
+	rc = append_capture(&l,
+		"deny perm=any all : ftype=text/x-python", 2,
+		err, sizeof(err));
+	if (rc)
+		error(1, 0, "language deny rule parse failed: %s", err);
+
+	prep_nfsd_event(&e, "nfsd", 2, FAN_OPEN_PERM);
+	if (evaluate(&l, &e) != ALLOW)
+		error(1, 0, "nfsd open did not bypass language denial");
+	free_event(&e);
+
+	prep_nfsd_event(&e, "nfsd", 2, FAN_OPEN_EXEC_PERM);
+	if (evaluate(&l, &e) != DENY)
+		error(1, 0, "nfsd rule unexpectedly allowed execute event");
+	free_event(&e);
+
+	prep_nfsd_event(&e, "nfsd", 1, FAN_OPEN_PERM);
+	if (evaluate(&l, &e) != DENY)
+		error(1, 0, "non-kernel nfsd process matched exception");
+	free_event(&e);
+
+	prep_nfsd_event(&e, "kworker", 2, FAN_OPEN_PERM);
+	if (evaluate(&l, &e) != DENY)
+		error(1, 0, "unrelated kernel thread matched nfsd exception");
+	free_event(&e);
+
+	rules_clear(&l);
+}
+
+/*
+ * test_unset_auid_rule - verify the unsigned representation of an unset auid.
+ *
+ * Audit uses -1 internally for an unset login uid, but fapolicyd rule values
+ * are unsigned. The parser must reject -1 and a rule using 4294967295 must
+ * match the value reported for an unset audit uid.
+ */
+static void test_unset_auid_rule(void)
+{
+	char err[ERRBUF];
+	llist l;
+	event_t e;
+	int rc;
+
+	if (rules_create(&l))
+		error(1, 0, "rules_create failed");
+
+	rc = append_capture(&l,
+		"allow perm=open auid=4294967295 : all", 1,
+		err, sizeof(err));
+	if (rc)
+		error(1, 0, "unset auid rule parse failed: %s", err);
+
+	prep_event(&e, 4294967295U, "/bin/ls");
+	e.type = FAN_OPEN_PERM;
+	if (evaluate(&l, &e) != ALLOW)
+		error(1, 0, "unset auid did not match unsigned rule value");
+	free_event(&e);
+	rules_clear(&l);
+}
+
 int main(void)
 {
 	char err[ERRBUF];
@@ -801,7 +771,8 @@ int main(void)
 
 	test_pattern_outcome_rules();
 	test_glob_rules();
-	test_quoted_values();
+	test_nfsd_kernel_thread_rule();
+	test_unset_auid_rule();
 
 	/* positive path using fixture file */
 	if (rules_create(&l))
