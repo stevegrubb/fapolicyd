@@ -25,6 +25,7 @@
 #define LOGBUF 4096
 #define OLD_SYSLOG_FORMAT "rule,dec,perm,auid,:,path"
 #define PID_SYSLOG_FORMAT "rule,dec,perm,pid,:,path"
+#define PROC_FALLBACK_SYSLOG_FORMAT "rule,dec,perm,uid,gid,comm,:,path"
 
 extern atomic_bool stop;
 
@@ -301,6 +302,38 @@ static void require_decision_sources(void)
 }
 
 /*
+ * require_missing_proc_fields_log - log absent process attributes safely.
+ *
+ * The synthetic event has pid 0, so /proc status lookup fails. syslog
+ * formatting must use placeholders rather than dereferencing a missing
+ * UID/GID attribute set.
+ *
+ * Returns nothing; exits through error() on an unexpected decision or log.
+ */
+static void require_missing_proc_fields_log(void)
+{
+	conf_t cfg = { .syslog_format = PROC_FALLBACK_SYSLOG_FORMAT };
+	char log[LOGBUF];
+	event_t e;
+	decision_t decision;
+
+	if (load_text_policy(&cfg,
+	    "allow_syslog perm=any auid=1000 : path=/bin/ls\n"))
+		error(1, 0, "proc fallback policy load failed");
+
+	prep_event(&e, 1000, "/bin/ls");
+	decision = process_capture(&e, log, sizeof(log), NULL);
+	free_event(&e);
+
+	if (decision != ALLOW_SYSLOG)
+		error(1, 0, "proc fallback policy did not match");
+	if (strstr(log, "uid=?") == NULL ||
+	    strstr(log, "gid=?") == NULL ||
+	    strstr(log, "comm=?") == NULL)
+		error(1, 0, "missing proc fields were not logged safely: %s", log);
+}
+
+/*
  * require_fallthrough_metrics_use_cached_attrs - prevent lazy metric lookups
  * @void: no arguments are required.
  * Returns nothing.
@@ -449,6 +482,7 @@ int main(void)
 		error(1, 0, "invalid syslog reload succeeded");
 	require_old_policy("invalid syslog reload");
 	require_rule_hit_counters(&good_cfg);
+	require_missing_proc_fields_log();
 
 	atomic_store(&stop, true);
 	destroy_rules();

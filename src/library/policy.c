@@ -58,6 +58,7 @@
 					// decision, permission, obj & subj
 #define NGID_LIMIT		32	// Limit buffer size allocated for
 					// subject to not waste memory
+#define WB_SIZE 512
 #define VALIDATION_SYSLOG_FORMAT "rule,dec,perm,auid,pid,exe,:,path,ftype"
 
 /*
@@ -81,9 +82,11 @@ struct policy_snapshot {
 };
 
 struct policy_log_record {
-	struct policy_snapshot *policy;
+	const struct policy_snapshot *policy;
 	unsigned int rule_num;
 	decision_t results;
+	char message[WB_SIZE];
+	int priority;
 	bool enabled;
 };
 
@@ -133,8 +136,6 @@ struct fan_audit_response
 	struct fanotify_response_info_audit_rule a;
 };
 #endif
-
-#define WB_SIZE 512
 
 // This function returns 1 on success and 0 on failure
 static int parsing_obj;
@@ -1006,7 +1007,19 @@ static char *format_value(int item, unsigned int num, decision_t results,
 
 		} else { // UID/GID only log first 32
 			out = malloc(NGID_LIMIT*12);
-			if (out && subj->set) {
+			if (out == NULL)
+				return NULL;
+
+			/*
+			 * A process can exit while a non-permission event is being
+			 * reported.  Failed procfs lookups and incomplete status data
+			 * must not turn logging into a NULL dereference or an
+			 * uninitialized string read.
+			 */
+			if (subj == NULL || subj->set == NULL ||
+			    attr_set_empty(subj->set)) {
+				strcpy(out, "?");
+			} else {
 				char buf[12];
 				char *ptr = out;
 				int cnt = 0;
@@ -1028,8 +1041,9 @@ static char *format_value(int item, unsigned int num, decision_t results,
 					ptr = stpcpy(ptr, buf);
 					cnt++;
 				}
-			} else if (out)
-				strcpy(out, "?");
+				if (ptr == out)
+					strcpy(out, "?");
+			}
 		}
 	}
 	return out;
@@ -1054,31 +1068,51 @@ static void *fmemccpy(void* restrict dst, const void* restrict src, size_t n)
 }
 
 
-static void log_it(const struct policy_snapshot *policy, unsigned int num,
-		   decision_t results, event_t *e)
+/*
+ * policy_log_record_format - fully render one decision log record.
+ * @e: event whose attributes must be materialized before a permission reply.
+ * @record: owned destination retained until post-reply emission.
+ *
+ * Returns nothing.  The formatted text is copied out of the worker buffer so
+ * the post-reply emitter cannot make lazy process or file lookups.
+ */
+static void policy_log_record_format(struct policy_log_record *record,
+		event_t *e)
 {
 	struct decision_context *ctx = decision_context_current();
 	struct decision_timing_span timing;
-	int mode = results & SYSLOG ? LOG_INFO : LOG_DEBUG;
+	int mode;
 	unsigned int i;
 	size_t dsize;
 	ptrdiff_t written;
 	char *p1, *p2, *val;
+
+	if (record == NULL)
+		return;
+
+	record->enabled = false;
+	if (record->policy == NULL)
+		return;
+	mode = record->results & SYSLOG ? LOG_INFO : LOG_DEBUG;
 
 	decision_timing_stage_begin(
 		DECISION_TIMING_STAGE_SYSLOG_DEBUG_FORMAT, &timing);
 	if (ctx->working_buffer == NULL) {
 		ctx->working_buffer = malloc(WB_SIZE);
 		if (ctx->working_buffer == NULL) {
-			msg(LOG_ERR, "No working buffer for logging");
+			strcpy(record->message, "No working buffer for logging");
+			record->policy = NULL;
+			record->priority = LOG_ERR;
+			record->enabled = true;
 			decision_timing_stage_end(&timing);
 			return;
 		}
 	}
 
+	ctx->working_buffer[0] = '\0';
 	dsize = WB_SIZE;
 	p1 = p2 = ctx->working_buffer; // Dummy assignment for p1 to quiet warnings
-	for (i = 0; i < policy->num_fields && dsize; i++)
+	for (i = 0; i < record->policy->num_fields && dsize; i++)
 	{
 		if (dsize < WB_SIZE) {
 			// This is skipped first pass, p1 is initialized below
@@ -1088,19 +1122,19 @@ static void log_it(const struct policy_snapshot *policy, unsigned int num,
 				break;
 			dsize -= (size_t)written;
 		}
-		p1 = fmemccpy(p2, policy->fields[i].name, dsize);
+		p1 = fmemccpy(p2, record->policy->fields[i].name, dsize);
 		written = p1 - p2;
 		if ((size_t)written > dsize)
 			break;
 		dsize -= (size_t)written;
-		if (policy->fields[i].item != F_COLON) {
+		if (record->policy->fields[i].item != F_COLON) {
 			p2 = fmemccpy(p1, "=", dsize);
 			written = p2 - p1;
 			if ((size_t)written > dsize)
 				break;
 			dsize -= (size_t)written;
-			val = format_value(policy->fields[i].item, num,
-					   results, e);
+			val = format_value(record->policy->fields[i].item,
+					   record->rule_num, record->results, e);
 			p1 = fmemccpy(p2, val ? val : "?", dsize);
 			written = p1 - p2;
 			if ((size_t)written > dsize) {
@@ -1112,20 +1146,21 @@ static void log_it(const struct policy_snapshot *policy, unsigned int num,
 		}
 	}
 	ctx->working_buffer[WB_SIZE-1] = 0;	// Just in case
-	msg(mode, "%s", ctx->working_buffer);
+	strcpy(record->message, ctx->working_buffer);
+	record->policy = NULL;
+	record->priority = mode;
+	record->enabled = true;
 	decision_timing_stage_end(&timing);
 }
 
 /*
- * policy_log_record_emit - emit a delayed decision log record.
- * @record: log details captured during policy evaluation.
- * @e: event whose cached and lazy attributes are formatted.
+ * policy_log_record_emit - emit a pre-rendered decision log record.
+ * @record: fully formatted log text captured during policy evaluation.
  *
- * Returns nothing. Permission-event callers keep @record->policy and @e
- * alive until this returns, then close the fanotify event fd.
+ * Returns nothing. This only queues or writes the finished text; it never
+ * consults the event after the fanotify response is sent.
  */
-static void policy_log_record_emit(const struct policy_log_record *record,
-				   event_t *e)
+static void policy_log_record_emit(const struct policy_log_record *record)
 {
 	decision_timing_driver_t previous_driver;
 
@@ -1134,7 +1169,7 @@ static void policy_log_record_emit(const struct policy_log_record *record,
 
 	previous_driver = decision_timing_driver_push(
 		DECISION_TIMING_DRIVER_RESPONSE);
-	log_it(record->policy, record->rule_num, record->results, e);
+	msg(record->priority, "%s", record->message);
 	decision_timing_driver_pop(previous_driver);
 }
 
@@ -1160,6 +1195,8 @@ static decision_t process_event_evaluate(event_t *e,
 	struct policy_snapshot *policy;
 	decision_timing_driver_t previous_driver;
 	struct decision_timing_span eval_timing;
+	struct policy_log_record immediate_log;
+	struct policy_log_record *record;
 	lnode *r;
 	int release_policy;
 
@@ -1208,17 +1245,26 @@ static decision_t process_event_evaluate(event_t *e,
 	// Output some information if debugging on or syslogging requested
 	if ( (results & SYSLOG) || (debug_mode == 1) ||
 	     (debug_mode > 1 && (results & DENY)) ) {
-		if (log_record && !release_policy) {
-			log_record->policy = policy;
-			log_record->rule_num = r ? r->num : 0xFFFFFFFF;
-			log_record->results = results;
-			log_record->enabled = true;
+		if (log_record) {
+			/*
+			 * Permission events keep the process pinned until the caller
+			 * writes a verdict.  Resolve every syslog field now, then let
+			 * the caller defer only the potentially blocking log delivery.
+			 */
+			record = log_record;
 		} else {
-			previous_driver = decision_timing_driver_push(
-				DECISION_TIMING_DRIVER_RESPONSE);
-			log_it(policy, r ? r->num : 0xFFFFFFFF, results, e);
-			decision_timing_driver_pop(previous_driver);
+			memset(&immediate_log, 0, sizeof(immediate_log));
+			record = &immediate_log;
 		}
+		previous_driver = decision_timing_driver_push(
+			DECISION_TIMING_DRIVER_RESPONSE);
+		record->policy = policy;
+		record->rule_num = r ? r->num : 0xFFFFFFFF;
+		record->results = results;
+		policy_log_record_format(record, e);
+		decision_timing_driver_pop(previous_driver);
+		if (!log_record)
+			policy_log_record_emit(record);
 	}
 
 	// Record which rule (rules are 1 based when listed by the cli tool)
@@ -1235,10 +1281,9 @@ static decision_t process_event_evaluate(event_t *e,
 		decision = ALLOW;
 
 	/*
-	 * Non-permission callers release only after synchronous log formatting
-	 * because log_it() reads the snapshot's syslog field array. Permission
-	 * callers keep their pinned reference for delayed logging after the
-	 * fanotify response is written.
+	 * All callers format logs before releasing the policy snapshot because the
+	 * formatter reads its syslog field array. Permission callers retain only
+	 * the owned text for emission after the fanotify response is written.
 	 */
 	policy_snapshot_end_read(policy, release_policy);
 	return decision;
@@ -1325,8 +1370,8 @@ int reply_event_init(int fd)
  * @reply: FAN_ALLOW/FAN_DENY response bits.
  * @e: optional event used for audit response details.
  *
- * Returns nothing. The caller keeps ownership of metadata->fd so post-verdict
- * logging can still format fields that lazily inspect the file.
+ * Returns nothing. The caller keeps ownership of metadata->fd and closes it
+ * after writing the response; permission-event log fields are pre-rendered.
  */
 static void reply_event_write(int fd,
 		const struct fanotify_event_metadata *metadata,
@@ -1455,6 +1500,7 @@ void make_policy_decision(decision_event_t *decision_event, int fd,
 	decision_timing_driver_t previous_driver;
 	struct policy_log_record log_record = { 0 };
 	bool log_build_deny = false;
+	bool event_fd_closed = false;
 
 	/*
 	 * Pin before new_event(): building subject attributes may call
@@ -1508,19 +1554,23 @@ void make_policy_decision(decision_event_t *decision_event, int fd,
 					  decision & FAN_RESPONSE_MASK,
 					  metric_event);
 		decision_timing_driver_pop(previous_driver);
+		/* Log fields were materialized before the reply, so release it now. */
+		if (metadata->fd >= 0) {
+			close(metadata->fd);
+			event_fd_closed = true;
+		}
 	}
 	/*
-	 * The kernel verdict is already written. Emit decision logs only after
-	 * that point so logging cannot stop the response needed by journald,
-	 * rsyslog, or another logging component. Keep metadata->fd open until
-	 * logging finishes because syslog_format fields may lazily resolve path,
-	 * MIME, trust, or hash data from it.
+	 * process_event_evaluate() rendered the complete decision log while this
+	 * permission event still pinned the subject. Emit only that owned text
+	 * after the verdict so journald, rsyslog, or another logging component
+	 * cannot delay the fanotify response.
 	 */
 	if (log_build_deny)
 		log_event_build_deny(decision_event);
 	else
-		policy_log_record_emit(&log_record, &e);
-	if (metadata->fd >= 0)
+		policy_log_record_emit(&log_record);
+	if (!event_fd_closed && metadata->fd >= 0)
 		close(metadata->fd);
 	decision_timing_stage_end(&response_timing);
 

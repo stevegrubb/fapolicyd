@@ -340,52 +340,23 @@ static void consume_groups_fragment(attr_sets_entry_t *groups,
 }
 
 /*
- * read_proc_status_fd - Parse selected fields from a status-like stream.
- * @fd: descriptor positioned at the beginning of proc status content
- * @fields: bitmap of PROC_STAT_* flags describing desired data
- * @info: storage describing the results for the requested fields
+ * clear_proc_status_fields - discard requested proc status results.
+ * @info: result storage whose requested fields should be reset.
+ * @fields: bitmap of PROC_STAT_* fields to clear.
  *
- * The helper parses the status file once and populates @info for every
- * requested field.  Existing data for the requested fields is released
- * before new values are recorded.  The function returns 0 on success and
- * -1 when the status file cannot be processed.
+ * Returns nothing. This leaves requested pointer fields NULL so callers never
+ * observe partial procfs data after a reader or parse failure.
  */
-int read_proc_status_fd(int fd, unsigned int fields,
-		struct proc_status_info *info)
+static void clear_proc_status_fields(struct proc_status_info *info,
+		unsigned int fields)
 {
-	char buf[80];
-	char gid_partial[32];
-	int rc = 0;
-	int in_groups_line = 0;
-	unsigned int found = 0;
-	size_t gid_partial_len = 0;
-
-	if (info == NULL || fields == 0)
-		return 0;
-
-	// Initialize info struct
 	if (fields & PROC_STAT_UID) {
-		if (info->uid) {
-			attr_set_destroy(info->uid);
-			info->uid = NULL;
-		}
-		info->uid = attr_set_create(NULL, UNSIGNED);
-		if (info->uid == NULL)
-			return -1;
+		attr_set_destroy(info->uid);
+		info->uid = NULL;
 	}
 	if (fields & PROC_STAT_GID) {
-		if (info->groups) {
-			attr_set_destroy(info->groups);
-			info->groups = NULL;
-		}
-		info->groups = attr_set_create(NULL, UNSIGNED);
-		if (info->groups == NULL) {
-			if (fields & PROC_STAT_UID) {
-				attr_set_destroy(info->uid);
-				info->uid = NULL;
-			}
-			return -1;
-		}
+		attr_set_destroy(info->groups);
+		info->groups = NULL;
 	}
 	if (fields & PROC_STAT_COMM) {
 		free(info->comm);
@@ -395,22 +366,56 @@ int read_proc_status_fd(int fd, unsigned int fields,
 		info->ppid = -1;
 	if (fields & PROC_STAT_TRACER)
 		info->tracer_state = PROC_TRACER_UNKNOWN;
+}
 
-	if (fd < 0) {
-		if (fields & PROC_STAT_UID) {
-			attr_set_destroy(info->uid);
-			info->uid = NULL;
-		}
-		if (fields & PROC_STAT_GID) {
-			attr_set_destroy(info->groups);
-			info->groups = NULL;
-		}
-		return -1;
+/*
+ * read_proc_status_fd - Parse selected fields from a status-like stream.
+ * @fd: descriptor positioned at the beginning of proc status content
+ * @fields: bitmap of PROC_STAT_* flags describing desired data
+ * @info: storage describing the results for the requested fields
+ *
+ * The helper parses the status file once and populates @info for every
+ * requested field. Existing data for the requested fields is released before
+ * new values are recorded. The function returns 0 only when every requested
+ * field is complete. It returns -1 and clears requested results on reader
+ * errors, result-set allocation failures, or incomplete status data.
+ */
+int read_proc_status_fd(int fd, unsigned int fields,
+		struct proc_status_info *info)
+{
+	char buf[80];
+	char gid_partial[32];
+	int rc = 0;
+	int in_groups_line = 0;
+	/* GID matching needs both primary credentials and supplemental groups. */
+	int gid_credentials_found = 0;
+	int gid_groups_found = 0;
+	unsigned int found = 0;
+	size_t gid_partial_len = 0;
+	fd_fgets_state_t *st = NULL;
+
+	if (info == NULL || fields == 0)
+		return 0;
+
+	clear_proc_status_fields(info, fields);
+
+	if (fields & PROC_STAT_UID) {
+		info->uid = attr_set_create(NULL, UNSIGNED);
+		if (info->uid == NULL)
+			goto fail;
+	}
+	if (fields & PROC_STAT_GID) {
+		info->groups = attr_set_create(NULL, UNSIGNED);
+		if (info->groups == NULL)
+			goto fail;
 	}
 
-	fd_fgets_state_t *st = fd_fgets_init();
+	if (fd < 0)
+		goto fail;
+
+	st = fd_fgets_init();
 	if (st == NULL)
-		return -1;
+		goto fail;
 
 	do {
 		rc = fd_fgets_r(st, buf, sizeof(buf), fd);
@@ -425,7 +430,9 @@ int read_proc_status_fd(int fd, unsigned int fields,
 						line_complete, gid_partial,
 						&gid_partial_len);
 				if (line_complete) {
-					found |= PROC_STAT_GID;
+					gid_groups_found = 1;
+					if (gid_credentials_found)
+						found |= PROC_STAT_GID;
 					in_groups_line = 0;
 				}
 				continue;
@@ -443,27 +450,30 @@ int read_proc_status_fd(int fd, unsigned int fields,
 				info->comm = strdup(name);
 				if (info->comm == NULL)
 					rc = -1;
-				found |= PROC_STAT_COMM;
+				else
+					found |= PROC_STAT_COMM;
 				continue;
 			}
 			if ((fields & PROC_STAT_PPID) &&
 				    info->ppid == -1 &&
 				    memcmp(buf, "PPid:", 5) == 0) {
 				long value;
-				if (sscanf(buf, "PPid: %ld", &value) == 1)
+				if (sscanf(buf, "PPid: %ld", &value) == 1) {
 					info->ppid = (pid_t)value;
-				found |= PROC_STAT_PPID;
+					found |= PROC_STAT_PPID;
+				}
 				continue;
 			}
 			if ((fields & PROC_STAT_TRACER) &&
 				    info->tracer_state == PROC_TRACER_UNKNOWN &&
 				    memcmp(buf, "TracerPid:", 10) == 0) {
 				long value;
-				if (sscanf(buf, "TracerPid: %ld", &value) == 1)
+				if (sscanf(buf, "TracerPid: %ld", &value) == 1) {
 					info->tracer_state = value > 0 ?
 						PROC_TRACER_TRACED :
 						PROC_TRACER_NOT_TRACED;
-				found |= PROC_STAT_TRACER;
+					found |= PROC_STAT_TRACER;
+				}
 				continue;
 			}
 			/*
@@ -492,7 +502,8 @@ int read_proc_status_fd(int fd, unsigned int fields,
 						attr_set_append_int(info->uid,
 							(int64_t)fs_uid);
 				}
-				found |= PROC_STAT_UID;
+				if (fields_read >= 1)
+					found |= PROC_STAT_UID;
 				continue;
 			}
 			if ((fields & PROC_STAT_GID) &&
@@ -515,7 +526,12 @@ int read_proc_status_fd(int fd, unsigned int fields,
 					    attr_set_append_int(info->groups,
 							(int64_t)fs_gid);
 				}
-				// Not marking found - wait for supplemental
+				if (fields_read >= 1) {
+					gid_credentials_found = 1;
+					if (gid_groups_found)
+						found |= PROC_STAT_GID;
+				}
+				// Wait for the supplemental Groups line before succeeding.
 				continue;
 			}
 			/*
@@ -531,8 +547,11 @@ int read_proc_status_fd(int fd, unsigned int fields,
 						line_complete, gid_partial,
 						&gid_partial_len);
 				}
-				if (line_complete)
-					found |= PROC_STAT_GID;
+				if (line_complete) {
+					gid_groups_found = 1;
+					if (gid_credentials_found)
+						found |= PROC_STAT_GID;
+				}
 				else {
 					in_groups_line = 1;
 					continue;
@@ -543,9 +562,17 @@ int read_proc_status_fd(int fd, unsigned int fields,
 	// if more text, no errors, and we're not done, loop again
 	} while (!fd_fgets_eof_r(st) && rc > 0 && found != fields);
 
-	fd_fgets_destroy(st);
+	if (rc < 0 || found != fields)
+		goto fail;
 
+	fd_fgets_destroy(st);
 	return 0;
+
+fail:
+	if (st)
+		fd_fgets_destroy(st);
+	clear_proc_status_fields(info, fields);
+	return -1;
 }
 
 

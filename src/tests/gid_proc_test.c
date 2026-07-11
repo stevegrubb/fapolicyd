@@ -98,6 +98,78 @@ static void check_split_groups_status(void)
 }
 
 /*
+ * check_truncated_status_cleanup - reject a partial Groups line.
+ *
+ * Return: none; exits through error() if incomplete status data succeeds or
+ * leaves a partially populated result behind.
+ */
+static void check_truncated_status_cleanup(void)
+{
+	char status_template[] = "/tmp/fapolicyd-status-XXXXXX";
+	const char content[] =
+		"Name:\ttestproc\n"
+		"Uid:\t1000 1000 1000 1000\n"
+		"Gid:\t1000 1000 1000 1000\n"
+		"Groups:\t1000 1001";
+	struct proc_status_info info = {
+		.ppid = -1,
+		.uid = NULL,
+		.groups = NULL,
+		.comm = NULL,
+	};
+	int fd;
+
+	fd = mkstemp(status_template);
+	if (fd < 0)
+		error(1, errno, "mkstemp failed");
+	if (write(fd, content, sizeof(content) - 1) !=
+	    (ssize_t)(sizeof(content) - 1))
+		error(1, errno, "write truncated status failed");
+	if (lseek(fd, 0, SEEK_SET) == (off_t)-1)
+		error(1, errno, "lseek truncated status failed");
+
+	if (read_proc_status_fd(fd,
+		    PROC_STAT_UID | PROC_STAT_GID | PROC_STAT_COMM, &info) == 0)
+		error(1, 0, "Truncated status unexpectedly succeeded");
+
+	close(fd);
+	unlink(status_template);
+	if (info.uid || info.groups || info.comm)
+		error(1, 0, "Truncated status left partial data behind");
+}
+
+/*
+ * check_status_reader_error_cleanup - reject a status descriptor read error.
+ *
+ * Return: none; exits through error() if a reader error succeeds or leaves
+ * partial result storage allocated.
+ */
+static void check_status_reader_error_cleanup(void)
+{
+	struct proc_status_info info = {
+		.ppid = -1,
+		.uid = NULL,
+		.groups = NULL,
+		.comm = NULL,
+	};
+	int fds[2];
+
+	if (pipe(fds))
+		error(1, errno, "pipe failed");
+	if (fcntl(fds[0], F_SETFL, O_NONBLOCK) == -1)
+		error(1, errno, "fcntl O_NONBLOCK failed");
+
+	if (read_proc_status_fd(fds[0],
+		    PROC_STAT_UID | PROC_STAT_GID | PROC_STAT_COMM, &info) == 0)
+		error(1, 0, "Status reader error unexpectedly succeeded");
+
+	close(fds[0]);
+	close(fds[1]);
+	if (info.uid || info.groups || info.comm)
+		error(1, 0, "Status reader error left partial data behind");
+}
+
+/*
  * main - validate GID collection helper captures all credential facets
  *
  * Return: 0 when all expected group IDs are reported, or terminate via error()
@@ -120,6 +192,8 @@ int main(void)
 	unsigned int missing_gid;
 
 	check_split_groups_status();
+	check_truncated_status_cleanup();
+	check_status_reader_error_cleanup();
 
 	if (read_proc_status(getpid(), PROC_STAT_GID, &info) != 0)
 		error(1, 0, "Unable to obtain gid set");
