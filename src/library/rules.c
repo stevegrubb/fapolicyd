@@ -835,7 +835,7 @@ static int parse_new_format(llist *l, lnode *n, int lineno)
 			*ptr2 = 0;
 			ptr2++;
 			if (state == 0) {
-				type = subj_name_to_val(ptr, 2);
+				type = subj_name_to_val(ptr, RULE_FMT_COLON);
 				if (type == -1) {
 					msg(LOG_ERR,
 					"Field type (%s) is unknown in line %d",
@@ -1093,7 +1093,7 @@ static enum rule_parse_result nv_split(llist *l, char *buf, lnode *n,
 						return RULE_PARSE_ERROR;
 					}
 				} else {
-					type = subj_name_to_val(ptr, 2);
+					type = subj_name_to_val(ptr, RULE_FMT_COLON);
 					if (type == -1) {
 						msg(LOG_ERR,
 					"Field type (%s) is unknown in line %d",
@@ -1649,9 +1649,9 @@ static int legacy_untrusted_subject_path_blocked(lnode *r, unsigned int idx,
 	return is_obj_trusted(e);
 }
 
-// Returns 0 if no match, 1 if a match
+// Returns 0 if no match, 1 if a match, -1 on error
 __attribute__((hot))
-static decision_t check_object(lnode *r, event_t *e)
+static int check_object(lnode *r, event_t *e)
 {
 	unsigned int cnt = 0;
 
