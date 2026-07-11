@@ -5,8 +5,17 @@ fapolicyd.trust \- fapolicyd's file of trust
 The file
 .I /etc/fapolicyd/fapolicyd.trust
 contains list of trusted files/binaries for the application whitelisting daemon. You may add comments to the file by starting the line with a '#' character.
-Each line has to contain three columns and space is a valid separator. The first column contains full path to the file, the second is size of the file in bytes
-and the third is valid sha256 hash.
+Each non-comment line contains a full path, size in bytes, and a valid SHA256
+hash. Version 3 trust files write paths without escaping and find the size and
+hash by splitting at the final two spaces. A path may therefore contain spaces.
+The \fBfapolicyd-cli --file\fP commands receive ordinary shell arguments; quote
+a path containing a space in the shell, for example
+\fBfapolicyd-cli --file add "/tmp/first last/"\fP. In a version 3 trust file,
+\fB%20\fP is a literal percent sign followed by \fB20\fP, not a space.
+.sp
+Version 2 trust files are accepted for compatibility and use their legacy
+percent escaping, including \fB%20\fP for a space. Newly rewritten trust files
+use version 3, so do not use version-2 percent escapes in new entries.
 .sp
 The directory \fI/etc/fapolicyd/trust\&.d\fR can be used to store multiple trust files\&.
 This way a privileged user can split the trust database into multiple files and manage them separately through \fBfapolicyd\-cli\fR\&.

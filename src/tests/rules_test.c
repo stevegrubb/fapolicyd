@@ -134,6 +134,22 @@ static const struct err_case errors[] = {
 	{
 	{ "allow perm=any exe=glob:opt/app-* : all", NULL },
 	"subject exe glob pattern must be an absolute path"
+	},
+	{
+	{ "allow perm=any all : path=/tmp/first last/tool", NULL },
+	"'=' is missing for field last/tool, in line 1"
+	},
+	{
+	{ "allow perm=any all : path=\"/tmp/first last/tool", NULL },
+	"Unterminated quoted value in line 1"
+	},
+	{
+	{ "allow perm=any all : path=\"/tmp/first last/tool\"suffix", NULL },
+	"Characters after quoted value in line 1"
+	},
+	{
+	{ "allow perm=any all : dir=\"glob:/tmp/first last/*\"", NULL },
+	"object dir does not support glob patterns; glob: is valid only with exe and path"
 	}
 };
 
@@ -565,6 +581,153 @@ static void test_glob_rules(void)
 }
 
 /*
+ * test_quoted_values - verify quoted rule values and glob interaction.
+ *
+ * Double quotes keep spaces in one value for exact exe, path, and directory
+ * matching. The lexer removes those quotes before glob validation, so quoted
+ * glob: values keep their normal fnmatch behavior. Percent escapes are not
+ * decoded by rules and therefore match literal percent characters.
+ *
+ * Returns: none. Exits on test failure.
+ */
+static void test_quoted_values(void)
+{
+	static const struct {
+		const char *rule;
+		const char *exe;
+		const char *path;
+		decision_t expected;
+		const char *name;
+	} cases[] = {
+		{
+			"allow perm=any all : dir=\"/tmp/first last/\"",
+			"/usr/bin/bash", "/tmp/first last/tool", ALLOW,
+			"quoted object directory"
+		},
+		{
+			"allow perm=any all : dir=\"/tmp/first last/\"",
+			"/usr/bin/bash", "/tmp/first last-other/tool",
+			NO_OPINION, "quoted directory boundary"
+		},
+		{
+			"allow perm=any dir=\"/tmp/first last/\" : all",
+			"/tmp/first last/tool", "/tmp/input", ALLOW,
+			"quoted subject directory"
+		},
+		{
+			"allow perm=any all : path=\"/tmp/first last/tool\"",
+			"/usr/bin/bash", "/tmp/first last/tool", ALLOW,
+			"quoted exact path"
+		},
+		{
+			"allow perm=any exe=\"/tmp/first last/tool\" : all",
+			"/tmp/first last/tool", "/tmp/input", ALLOW,
+			"quoted exact executable"
+		},
+		{
+			"allow perm=any all : path=\"/tmp/first \\\"last\\\"/tool\"",
+			"/usr/bin/bash", "/tmp/first \"last\"/tool", ALLOW,
+			"quoted literal double quote"
+		},
+		{
+			"allow perm=any all : path=\"/tmp/first last/tool\",\"/tmp/second name/tool\"",
+			"/usr/bin/bash", "/tmp/second name/tool", ALLOW,
+			"quoted inline path alternatives"
+		},
+		{
+			"allow perm=any all : path=\"glob:/tmp/first last/*\"",
+			"/usr/bin/bash", "/tmp/first last/tool", ALLOW,
+			"quoted path glob"
+		},
+		{
+			"allow perm=any exe=\"glob:/tmp/first last/*\" : all",
+			"/tmp/first last/tool", "/tmp/input", ALLOW,
+			"quoted executable glob"
+		},
+		{
+			"allow perm=any all : path=\"glob:/tmp/first last/\\*\"",
+			"/usr/bin/bash", "/tmp/first last/*", ALLOW,
+			"quoted glob keeps wildcard escape"
+		},
+		{
+			"allow perm=any all : path=\"/tmp/first%20last/tool\"",
+			"/usr/bin/bash", "/tmp/first%20last/tool", ALLOW,
+			"percent escape remains literal"
+		},
+		{
+			"allow perm=any all : path=\"/tmp/first%20last/tool\"",
+			"/usr/bin/bash", "/tmp/first last/tool", NO_OPINION,
+			"percent escape does not match space"
+		},
+	};
+	char err[ERRBUF];
+	llist l;
+	event_t e;
+
+	for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); i++) {
+		decision_t decision = evaluate_glob_rule(cases[i].rule,
+			cases[i].exe, cases[i].path);
+
+		if (decision != cases[i].expected)
+			error(1, 0, "%s produced decision %d, expected %d",
+			      cases[i].name, decision, cases[i].expected);
+	}
+
+	if (rules_create(&l))
+		error(1, 0, "rules_create failed");
+	if (append_capture(&l,
+		"%quoted_paths=\"/tmp/first last/tool\",\"/tmp/second name/tool\"", 1,
+		err, sizeof(err)))
+		error(1, 0, "quoted set parse failed: %s", err);
+	if (append_capture(&l,
+		"allow perm=any all : path=%quoted_paths", 2,
+		err, sizeof(err)))
+		error(1, 0, "quoted set rule parse failed: %s", err);
+
+	prep_macro_event(&e, "/usr/bin/bash", "/tmp/second name/tool");
+	if (evaluate(&l, &e) != ALLOW)
+		error(1, 0, "quoted named path set did not match");
+	free_event(&e);
+	rules_clear(&l);
+
+	if (rules_create(&l))
+		error(1, 0, "rules_create failed");
+	if (append_capture(&l,
+		"allow perm=any all : dir=\"/tmp/first last/allowed/\"", 1,
+		err, sizeof(err)))
+		error(1, 0, "quoted allow directory rule parse failed: %s", err);
+	if (append_capture(&l,
+		"deny perm=any all : dir=\"/tmp/first last/denied/\"", 2,
+		err, sizeof(err)))
+		error(1, 0, "quoted deny directory rule parse failed: %s", err);
+	if (append_capture(&l,
+		"deny perm=any all : dir=\"/tmp/first last/\"", 3,
+		err, sizeof(err)))
+		error(1, 0, "quoted parent directory rule parse failed: %s", err);
+
+	prep_macro_event(&e, "/usr/bin/bash", "/tmp/first last/allowed/tool");
+	if (evaluate(&l, &e) != ALLOW)
+		error(1, 0, "quoted allowed directory did not allow");
+	free_event(&e);
+
+	prep_macro_event(&e, "/usr/bin/bash", "/tmp/first last/denied/tool");
+	if (evaluate(&l, &e) != DENY)
+		error(1, 0, "quoted denied directory did not deny");
+	free_event(&e);
+
+	prep_macro_event(&e, "/usr/bin/bash", "/tmp/first last/leaked/tool");
+	if (evaluate(&l, &e) != DENY)
+		error(1, 0, "quoted parent directory did not deny leaked path");
+	free_event(&e);
+
+	prep_macro_event(&e, "/usr/bin/bash", "/tmp/first last/tool");
+	if (evaluate(&l, &e) != DENY)
+		error(1, 0, "quoted parent directory did not deny direct path");
+	free_event(&e);
+	rules_clear(&l);
+}
+
+/*
  * evaluate_pattern_rule - parse and evaluate one pattern rule
 *
 * rule: policy rule text to parse
@@ -638,6 +801,7 @@ int main(void)
 
 	test_pattern_outcome_rules();
 	test_glob_rules();
+	test_quoted_values();
 
 	/* positive path using fixture file */
 	if (rules_create(&l))

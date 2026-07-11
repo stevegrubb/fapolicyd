@@ -149,6 +149,15 @@ Dumps the trust db contents for inspection. This will print the original trust s
 .TP
 .B \-f, \-\-file  add|delete|update [path]
 Manage the file trust database.
+.PP
+The path is a command-line argument, not a rule-file value. Use the shell's
+quoting to pass a path containing a space, for example:
+.nf
+.B fapolicyd-cli --file add "/tmp/first last/"
+.B fapolicyd-cli --file delete "/tmp/first last/"
+.fi
+The CLI receives the unquoted path. A literal \fB%20\fP in a command-line path
+is not decoded to a space.
 .RS
 .TP 12
 .B add

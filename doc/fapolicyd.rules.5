@@ -162,6 +162,34 @@ is still accepted)
 This option matches against the hash of the file being accessed. The accepted hash length follows the trust source, so RPM entries built with SHA512 store SHA512 digests while other sources may continue to provide SHA256. The hash in the rules should be all lowercase letters and do NOT start with 0x. Lowercase is the default output of sha256sum and sha512sum. The SHA256HASH keyword remains for compatibility but is deprecated; prefer FILE_HASH for new rules.
 .RE
 
+.SH QUOTED VALUES
+Rule fields are separated by spaces. Enclose a complete string value in double
+quotes when it contains a space. The surrounding quotes are syntax and are not
+part of the value used for matching. This applies consistently to subject
+.B exe ,
+subject and object
+.B dir ,
+and object
+.BR path :
+
+.nf
+.B allow perm=execute all : dir="/tmp/first last/"
+.B allow perm=execute exe="/tmp/first last/tool" : all
+.B allow perm=execute all : path="/tmp/first last/tool"
+.fi
+
+Double quotes can also be used in named string-set definitions and in each
+comma-separated string value. Within a quoted value, a backslash before a
+double quote or another backslash represents that character. Other backslashes
+are preserved, so glob patterns retain their normal backslash behavior.
+
+Percent escapes are not interpreted in rules. For example,
+.B dir="/tmp/first%20last/"
+matches a literal percent sign followed by \fB20\fP, not a space. A backslash
+before a space and shell-style single quotes are not rule-file quoting forms;
+double quotes are the only supported way to include a literal space in a rule
+value.
+
 .SH PATH GLOBBING
 Rule values use exact matching by default. Prefix a value with
 .B glob:
@@ -222,6 +250,21 @@ period in a path component unless the period appears explicitly in the
 pattern. Backslash quotes a metacharacter. Recursive
 .B **
 globstar matching is not supported.
+
+When a glob value contains a space, quote the complete value, including the
+.B glob:
+prefix. For example:
+
+.nf
+.B allow perm=execute all : path="glob:/tmp/first last/*"
+.B allow perm=execute exe="glob:/tmp/first last/*" : all
+.fi
+
+The quotes are removed before glob validation and matching. The
+.B dir
+attribute remains a literal prefix and does not accept a quoted or unquoted
+.B glob:
+value.
 
 Bracket ranges such as
 .B [a-z]

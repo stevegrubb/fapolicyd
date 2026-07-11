@@ -72,6 +72,106 @@ static int assign_subject(llist *l, lnode *n, int type,
 static int assign_object(llist *l, lnode *n, int type,
 			 const char *ptr2, int lineno) __wur;
 
+enum rule_token_error {
+	RULE_TOKEN_OK = 0,
+	RULE_TOKEN_UNTERMINATED_QUOTE,
+	RULE_TOKEN_TRAILING_TEXT
+};
+
+/*
+ * next_rule_token - get one space-delimited rule token with quoted values.
+ * @cursor: current mutable position in the rule line, advanced on success.
+ * @error: receives a quoted-value syntax error, if one occurs.
+ *
+ * A double quote begins quoted text only at the start of an attribute value
+ * (immediately after '=' or ','). This preserves literal quotes elsewhere in
+ * existing unquoted values. Quotes are removed in place, and only '\\"' and
+ * '\\\\' are unescaped inside quoted text so fnmatch backslash escapes such as
+ * '\\*' reach glob evaluation unchanged.
+ *
+ * Returns: the next token, or NULL when no token remains or @error is set.
+ */
+static char *next_rule_token(char **cursor, enum rule_token_error *error)
+{
+	char *read, *write, *token;
+	bool quoted = false;
+
+	if (error)
+		*error = RULE_TOKEN_OK;
+	if (!cursor || !*cursor)
+		return NULL;
+
+	read = *cursor;
+	while (*read == ' ')
+		read++;
+	if (*read == '\0') {
+		*cursor = read;
+		return NULL;
+	}
+
+	token = read;
+	write = read;
+	while (*read) {
+		if (quoted) {
+			if (*read == '\\' &&
+			    (read[1] == '"' || read[1] == '\\')) {
+				*write++ = read[1];
+				read += 2;
+				continue;
+			}
+			if (*read == '"') {
+				quoted = false;
+				read++;
+				if (*read && *read != ' ' && *read != ',') {
+					if (error)
+						*error = RULE_TOKEN_TRAILING_TEXT;
+					return NULL;
+				}
+				continue;
+			}
+			*write++ = *read++;
+			continue;
+		}
+
+		if (*read == ' ')
+			break;
+		if (*read == '"' && read > token &&
+		    (read[-1] == '=' || read[-1] == ',')) {
+			quoted = true;
+			read++;
+			continue;
+		}
+		*write++ = *read++;
+	}
+
+	if (quoted) {
+		if (error)
+			*error = RULE_TOKEN_UNTERMINATED_QUOTE;
+		return NULL;
+	}
+
+	while (*read == ' ')
+		read++;
+	*write = '\0';
+	*cursor = read;
+	return token;
+}
+
+/*
+ * report_rule_token_error - emit an actionable rule-value lexer diagnostic.
+ * @error: quoted-value error reported by next_rule_token().
+ * @lineno: source line used for the diagnostic.
+ *
+ * Returns: none.
+ */
+static void report_rule_token_error(enum rule_token_error error, int lineno)
+{
+	if (error == RULE_TOKEN_UNTERMINATED_QUOTE)
+		msg(LOG_ERR, "Unterminated quoted value in line %d", lineno);
+	else if (error == RULE_TOKEN_TRAILING_TEXT)
+		msg(LOG_ERR, "Characters after quoted value in line %d", lineno);
+}
+
 /*
  * validate_glob_set - validate explicitly marked glob values for an attribute
  * @type: parsed subject or object attribute type.
@@ -822,12 +922,14 @@ static int assign_object(llist *l, lnode *n, int type,
 }
 
 
-static int parse_new_format(llist *l, lnode *n, int lineno)
+static int parse_new_format(llist *l, lnode *n, int lineno,
+			    char **cursor)
 {
 	int state = 0;  // 0 == subj, 1 == obj
 	char *ptr;
+	enum rule_token_error token_error;
 
-	while ((ptr = strtok(NULL, " "))) {
+	while ((ptr = next_rule_token(cursor, &token_error))) {
 		int type;
 		char *ptr2 = strchr(ptr, '=');
 
@@ -872,6 +974,10 @@ static int parse_new_format(llist *l, lnode *n, int lineno)
 				ptr, lineno);
 			return 5;
 		}
+	}
+	if (token_error != RULE_TOKEN_OK) {
+		report_rule_token_error(token_error, lineno);
+		return 5;
 	}
 	return 0;
 }
@@ -1044,14 +1150,20 @@ static enum rule_parse_result nv_split(llist *l, char *buf, lnode *n,
 				       int lineno)
 {
 	char *ptr, *ptr2;
+	char *cursor = buf;
 	rformat_t format = RULE_FMT_ORIG;
 	attr_sets_t *sets = l->sets;
+	enum rule_token_error token_error;
 
 	if (strchr(buf, ':'))
 		format = RULE_FMT_COLON;
 	n->format = format;
 
-	ptr = strtok(buf, " ");
+	ptr = next_rule_token(&cursor, &token_error);
+	if (token_error != RULE_TOKEN_OK) {
+		report_rule_token_error(token_error, lineno);
+		return RULE_PARSE_ERROR;
+	}
 	if (ptr == NULL)
 		return RULE_PARSE_SKIP;
 	if (ptr[0] == '#')
@@ -1073,7 +1185,7 @@ static enum rule_parse_result nv_split(llist *l, char *buf, lnode *n,
 	// Default access permission is open
 	n->a = OPEN_ACC;
 
-	while ((ptr = strtok(NULL, " "))) {
+	while ((ptr = next_rule_token(&cursor, &token_error))) {
 		int type;
 
 		ptr2 = strchr(ptr, '=');
@@ -1104,7 +1216,7 @@ static enum rule_parse_result nv_split(llist *l, char *buf, lnode *n,
 							   lineno))
 						return RULE_PARSE_ERROR;
 				}
-				if (parse_new_format(l, n, lineno))
+				if (parse_new_format(l, n, lineno, &cursor))
 					return RULE_PARSE_ERROR;
 				goto finish_up;
 			}
@@ -1140,6 +1252,10 @@ static enum rule_parse_result nv_split(llist *l, char *buf, lnode *n,
 				ptr, lineno);
 			return RULE_PARSE_ERROR;
 		}
+	}
+	if (token_error != RULE_TOKEN_OK) {
+		report_rule_token_error(token_error, lineno);
+		return RULE_PARSE_ERROR;
 	}
 
 finish_up:
