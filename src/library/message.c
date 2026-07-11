@@ -464,6 +464,11 @@ int message_async_start(void)
 				 memory_order_relaxed) != LOG_ASYNC_OFF)
 		return 0;
 
+	/* file_init() clears MAGIC later in startup. Cache the stderr color
+	 * environment before the drain thread can read it concurrently. */
+	if (message_mode == MSG_STDERR)
+		(void)stderr_color_enabled();
+
 	if (sem_init(&log_sem, 0, 0))
 		return errno;
 
