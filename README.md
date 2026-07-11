@@ -250,6 +250,13 @@ the fapolicyd configuration directory. There is a new utility, fagenrules,
 which will compile the rules into a single file, compiled.rules, and place the
 resulting file in the main config directory.
 
+Starting with 2.0, fagenrules validates the generated candidate with the daemon
+policy parser before installation. It syncs and atomically renames a validated
+candidate into `compiled.rules`, leaving the installed file in place until the
+replacement is ready. It prints a SHA-256 ruleset identity when the rules are
+unchanged or successfully updated. Use `fagenrules --check` to determine
+whether the assembled policy needs an update without replacing `compiled.rules`.
+
 If you want to migrate your existing rules, just move them as is to the rules.d
 directory. You cannot have both compiled.rules and fapolicyd.rules. The
 fagenrules will notice this and put a warning in syslog. If you use fapolicyd-cli --list, it will also notice and warn. If you do have both files, the old rules
@@ -339,6 +346,21 @@ a prime number, you will get less cache churn due to collisions than if it
 had a common denominator. Some primes you might consider for cache size are:
 2039, 4099, 6143, 8191, 10243, 12281, 16381, 20483, 24571, 28669, 32687,
 40961, 49157, 57347, 65353, etc.
+
+## Decision worker tuning
+
+Starting with 2.0, `decision_threads` controls the number of decision workers.
+The default is `1`. Each worker has its own event queue, subject cache, object
+cache, and subject defer array, so `q_size`, `subj_cache_size`, and
+`obj_cache_size` are per-worker values. This setting requires a daemon restart.
+
+Increase the worker count only after observing persistent queue pressure under a
+representative workload: a high inter-thread queue depth relative to `q_size`,
+a non-zero queue-full count, or a growing oldest queued age. Start with two
+workers and compare the per-worker queue, cache, and defer data before making
+another change. A busy single PID remains on one stable worker, so one hot
+worker and idle peers can indicate workload skew rather than a need to
+continually increase the count.
 
 For day to day monitoring, `fapolicyd-cli --check-status` reports daemon
 health and configuration state, while `fapolicyd-cli --check-metrics` reports
@@ -563,6 +585,12 @@ journalctl -b -u fapolicyd.service
 ```
 to list out any events since boot by the fapolicyd service.
 
+On systemd builds with watchdog support, the installed service uses
+`Type=notify`, `WatchdogSec=10s`, and `Restart=on-failure`. The health monitor
+refreshes the watchdog while decision workers make progress. Adjust the
+watchdog with a systemd drop-in rather than editing the packaged unit; see
+[the systemd watchdog documentation](doc/systemd-watchdog.md).
+
 Starting with 1.1, fapolicyd-cli includes diagnostic and maintenance
 capabilities.
 
@@ -583,6 +611,7 @@ capabilities.
 | --timer-start          | 1.5      | Alias for --timing-start. |
 | --timer-stop           | 1.5      | Alias for --timing-stop. |
 | --compact-trustdb      | 1.6      | Rebuild and compact the daemon trustdb LMDB environment. |
+| --check-status and --check-metrics | 2.0 | Include aggregate and per-decision-worker health, queue, cache, and defer data. |
 
 
 
@@ -718,6 +747,10 @@ cd deb
 To build the `.deb` package that uses the `debdb` backend.
 You must add rules to `/etc/fapolicyd/rules.d/` and change configuration
 in `/etc/fapolicyd/fapolicyd.conf` to use `trust=debdb` after installation.
+The `debdb` import applies `fapolicyd-filter.conf` before package-owned paths
+enter the trust database. On package sets where the filter excludes many files,
+this reduces the active LMDB footprint and can reduce memory residency and
+improve trust lookup time.
 
 Also, if the distribution is very small, you can use the file trust database
 file. Just add the places where libraries and applications are stored.
