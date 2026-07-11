@@ -116,6 +116,21 @@ pid_t gettid(void)
 }
 #endif
 
+/*
+ * install_syscall_filter - install daemon seccomp restrictions.
+ *
+ * Package trust snapshots can be rebuilt after startup. The RPM database
+ * uses SQLite locks that are scoped to a process ID. Loading rpmdb in
+ * fapolicyd, or in one of its threads, lets a close of an rpmdb descriptor
+ * release that process's locks and can corrupt rpmdb during an RPM
+ * transaction. The fixed libexec RPM loader therefore runs in a separate
+ * process and returns a memfd snapshot.
+ *
+ * posix_spawn children inherit the daemon's seccomp filter, so builds with
+ * a package loader must keep execve available for that fixed loader.
+ *
+ * Returns nothing.
+ */
 static void install_syscall_filter(void)
 {
 	scmp_filter_ctx ctx;
@@ -125,7 +140,6 @@ static void install_syscall_filter(void)
 	if (ctx == NULL)
 		goto err_out;
 #if !defined(USE_RPM) && !defined(USE_DEB)
-	// Package-database backends spawn libexec helpers during startup.
 	rc = seccomp_rule_add(ctx, SCMP_ACT_ERRNO(EACCES),
 				SCMP_SYS(execve), 0);
 	if (rc < 0)
