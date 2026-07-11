@@ -106,7 +106,8 @@ static int do_perf_test(FILE *input)
 		if (fd < 0)
 			continue;
 		// Build an "event" to exercise fapolicyd's decision making
-		struct fanotify_event_metadata metadata;
+		// decision_event_init copies the complete kernel metadata record.
+		struct fanotify_event_metadata metadata = { 0 };
 		decision_event_t event;
 
 		metadata.fd = fd; // listener closes after reply
