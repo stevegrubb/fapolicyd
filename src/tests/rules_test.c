@@ -50,6 +50,8 @@ struct err_case {
 	const char *expect;
 };
 
+static decision_t evaluate(const llist *l, event_t *e);
+
 static const struct err_case errors[] = {
 	{
 	{ "allow perm=any auid=%missing : path=/bin/ls", NULL },
@@ -82,6 +84,34 @@ static const struct err_case errors[] = {
 	  "%dupe=3,4",
 	  NULL },
 	"set dupe was already defined!"
+	},
+	{
+	{ "%languages+=application/x-vendor-script", NULL },
+	"set languages must be defined before it can be extended"
+	},
+	{
+	{ "%custom=one",
+	  "%custom+=two",
+	  NULL },
+	"set append is only supported for %languages"
+	},
+	{
+	{ "%languages=1",
+	  "%languages+=application/x-vendor-script",
+	  NULL },
+	"set languages must have STRING type"
+	},
+	{
+	{ "%languages=text/x-python",
+	  "%languages+=",
+	  NULL },
+	"%languages+= requires at least one MIME type"
+	},
+	{
+	{ "%languages=text/x-python",
+	  "%languages+=glob:application/*",
+	  NULL },
+	"glob values are not valid in %languages"
 	},
 	{
 	{ "allow auid=1000 uid=-1 path=/bin/ls", NULL },
@@ -369,6 +399,60 @@ static void free_event(event_t *e)
 	object_clear(e->o);
 	free(e->s);
 	free(e->o);
+}
+
+/*
+ * test_language_set_extension - verify package MIME additions to %languages.
+ *
+ * The extension is a set union, so a duplicate MIME remains harmless while a
+ * new MIME becomes visible to ftype rules that use the built-in macro.
+ * Returns nothing. Exits on test failure.
+ */
+static void test_language_set_extension(void)
+{
+	char err[ERRBUF];
+	llist l;
+	event_t e;
+	object_attr_t ftype = {
+		.type = FTYPE,
+		.o = strdup("application/x-vendor-script"),
+	};
+	attr_sets_entry_t *languages;
+	int rc;
+
+	if (!ftype.o)
+		error(1, errno, "strdup failed");
+	if (rules_create(&l))
+		error(1, 0, "rules_create failed");
+
+	rc = append_capture(&l, "%languages=text/x-python", 1,
+			    err, sizeof(err));
+	if (rc)
+		error(1, 0, "language set parse failed: %s", err);
+	rc = append_capture(&l,
+		"%languages+=application/x-vendor-script,text/x-python", 2,
+		err, sizeof(err));
+	if (rc)
+		error(1, 0, "language set extension parse failed: %s", err);
+	rc = append_capture(&l,
+		"allow perm=open all : ftype=%languages", 3,
+		err, sizeof(err));
+	if (rc)
+		error(1, 0, "language ftype rule parse failed: %s", err);
+
+	languages = attr_sets_find(l.sets, "languages");
+	if (!languages || !attr_set_check_str(languages,
+			"application/x-vendor-script"))
+		error(1, 0, "language extension MIME was not added");
+
+	prep_event(&e, 1000, "/tmp/vendor-script");
+	if (object_add(e.o, &ftype))
+		error(1, 0, "language ftype setup failed");
+	e.type = FAN_OPEN_PERM;
+	if (evaluate(&l, &e) != ALLOW)
+		error(1, 0, "extended language MIME did not match ftype rule");
+	free_event(&e);
+	rules_clear(&l);
 }
 
 /*
@@ -773,6 +857,7 @@ int main(void)
 	test_glob_rules();
 	test_nfsd_kernel_thread_rule();
 	test_unset_auid_rule();
+	test_language_set_extension();
 
 	/* positive path using fixture file */
 	if (rules_create(&l))

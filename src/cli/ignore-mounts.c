@@ -233,12 +233,23 @@ static int compare_language_entry(void *a, void *b)
  * insert_language_mime - add a MIME string to the %languages tree.
  * @languages: AVL tree tracking the known MIME values.
  * @mime: MIME string trimmed from the rules file.
- * Returns 0 on success and 1 on allocation failure.
+ * Returns 0 on success, including an already-present MIME, and 1 on an
+ * invalid argument or allocation failure.
  */
 static int insert_language_mime(avl_tree_t *languages, const char *mime)
 {
 	struct language_entry *entry;
+	struct language_entry key = {
+		.mime = (char *)mime,
+	};
 	avl_t *ret;
+
+	if (languages == NULL || mime == NULL)
+		return 1;
+
+	/* Package fragments may repeat a MIME already present in the base set. */
+	if (avl_search(languages, &key.avl) != NULL)
+		return 0;
 
 	entry = malloc(sizeof(*entry));
 	if (entry == NULL)
@@ -608,64 +619,112 @@ static void print_skipped_summary(const char *mount)
 }
 
 /*
- * load_language_mimes - gather MIME types belonging to %languages.
+ * append_language_mimes - add a comma-separated MIME list to a tree.
  * @languages: AVL tree populated with MIME type strings.
- * @source_path: returns the path used while loading definitions.
- * Returns 0 on success and 1 on failure.
+ * @values: comma-separated MIME type list from a language set line.
+ *
+ * Returns 0 on success and 1 on allocation failure.
  */
-static int load_language_mimes(avl_tree_t *languages, const char **source_path)
+static int append_language_mimes(avl_tree_t *languages, const char *values)
+{
+	char *tmp;
+	char *ptr, *saved;
+	int rc = 0;
+
+	tmp = strdup(values);
+	if (tmp == NULL)
+		return 1;
+
+	ptr = strtok_r(tmp, ",", &saved);
+	while (ptr) {
+		char *mime = fapolicyd_strtrim(ptr);
+
+		if (*mime && insert_language_mime(languages, mime)) {
+			rc = 1;
+			break;
+		}
+		ptr = strtok_r(NULL, ",", &saved);
+	}
+
+	free(tmp);
+	return rc;
+}
+
+/*
+ * load_language_mimes_from_file - load %languages and its extensions.
+ * @languages: AVL tree populated with MIME type strings.
+ * @path: compiled or source policy file to read.
+ *
+ * Returns 0 on success, 1 on malformed input, or -1 when @path cannot be
+ * opened. An extension must follow the initial %languages definition.
+ */
+static int load_language_mimes_from_file(avl_tree_t *languages,
+					 const char *path)
 {
 	FILE *fp;
 	char *line = NULL;
 	size_t len = 0;
-	int rc = 1, found = 0;
+	int rc = 1;
+	int found = 0;
 
-	*source_path = LANGUAGE_RULES_FILE;
-	fp = fopen(*source_path, "rm");
-	if (fp == NULL) {
-		*source_path = RULES_FILE;
-		fp = fopen(*source_path, "rm");
-		if (fp == NULL)
-			return 1;
-	}
+	fp = fopen(path, "rm");
+	if (fp == NULL)
+		return -1;
 
 	while (getline(&line, &len, fp) != -1) {
 		char *entry = fapolicyd_strtrim(line);
+		const char *values;
 
 		if (strncmp(entry, "%languages=", 11) == 0) {
-			char *value = entry + 11;
-			char *tmp = strdup(value);
-			char *ptr, *saved;
-
-			if (tmp == NULL)
+			if (found)
 				goto done;
-
-			ptr = strtok_r(tmp, ",", &saved);
-			while (ptr) {
-				char *mime = fapolicyd_strtrim(ptr);
-
-				if (*mime) {
-					if (insert_language_mime(languages, mime)) {
-						free(tmp);
-						free_language_mimes(languages);
-						goto done;
-					}
-				}
-				ptr = strtok_r(NULL, ",", &saved);
-			}
-			free(tmp);
-			found = 1;
-			break;
+			values = entry + 11;
+		} else if (strncmp(entry, "%languages+=", 12) == 0) {
+			if (!found || entry[12] == '\0')
+				goto done;
+			values = entry + 12;
+		} else {
+			continue;
 		}
+
+		if (append_language_mimes(languages, values))
+			goto done;
+		found = 1;
 	}
 
 	if (found)
 		rc = 0;
 
 done:
+	if (rc)
+		free_language_mimes(languages);
 	free(line);
 	fclose(fp);
 	return rc;
+}
+
+/*
+ * load_language_mimes - gather MIME types belonging to %languages.
+ * @languages: AVL tree populated with MIME type strings.
+ * @source_path: returns the path used while loading definitions.
+ *
+ * Prefer compiled.rules because it is the policy the daemon actually loads,
+ * including package-installed %languages+= fragments. Fall back to the base
+ * source file only before fagenrules has produced a compiled policy.
+ * Returns 0 on success and 1 on failure.
+ */
+static int load_language_mimes(avl_tree_t *languages, const char **source_path)
+{
+	int rc;
+
+	*source_path = RULES_FILE;
+	rc = load_language_mimes_from_file(languages, *source_path);
+	if (rc != -1)
+		return rc;
+
+	*source_path = LANGUAGE_RULES_FILE;
+	rc = load_language_mimes_from_file(languages, *source_path);
+	return rc == 0 ? 0 : 1;
 }
 
 /*

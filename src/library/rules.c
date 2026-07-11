@@ -983,13 +983,67 @@ static int parse_new_format(llist *l, lnode *n, int lineno,
 }
 
 /*
- * parse_set_line - parse an attribute set definition
- * @sets: rule-load registry that owns named sets
- * @line: rule file line that starts with a '%' set name
- * @lineno: rule file line number used for diagnostics
+ * append_language_set_values - add MIME types to the %languages set.
+ * @set: existing string-valued %languages set.
+ * @values: mutable comma-separated MIME list.
+ * @lineno: rule file line number used for diagnostics.
+ *
+ * Existing MIME entries are intentionally ignored so independently packaged
+ * policy fragments can name the same language without breaking fagenrules.
+ * Returns 0 on success and 1 on invalid input or allocation failure.
+ */
+static int append_language_set_values(attr_sets_entry_t *set, char *values,
+				      int lineno)
+{
+	char *ptr, *saved;
+	int found = 0;
+
+	if (set->type != STRING) {
+		msg(LOG_ERR, "rules.conf:%d: parse_set_line: "
+			"set languages must have STRING type", lineno);
+		return 1;
+	}
+
+	ptr = strtok_r(values, ",", &saved);
+	while (ptr) {
+		ptr = fapolicyd_strtrim(ptr);
+		if (*ptr) {
+			found = 1;
+			/* ftype sets use exact MIME strings, never path globs. */
+			if (strncmp(ptr, ATTR_SET_GLOB_PREFIX,
+				    ATTR_SET_GLOB_PREFIX_LEN) == 0) {
+				msg(LOG_ERR, "rules.conf:%d: parse_set_line: "
+					"glob values are not valid in %%languages",
+					lineno);
+				return 1;
+			}
+			/* Multiple packages may name the same MIME type. */
+			if (!attr_set_check_str(set, ptr) &&
+			    attr_set_append_str(set, ptr))
+				return 1;
+		}
+		ptr = strtok_r(NULL, ",", &saved);
+	}
+
+	if (!found) {
+		msg(LOG_ERR, "rules.conf:%d: parse_set_line: "
+			"%%languages+= requires at least one MIME type", lineno);
+		return 1;
+	}
+
+	return 0;
+}
+
+/*
+ * parse_set_line - parse an attribute set definition.
+ * @sets: rule-load registry that owns named sets.
+ * @line: rule file line that starts with a '%' set name.
+ * @lineno: rule file line number used for diagnostics.
  *
  * The parser validates the set name, infers whether the values are strings
- * or integers, creates the set, and appends every parsed value. Set lines
+ * or integers, creates the set, and appends every parsed value. The
+ * %languages set additionally accepts += to let package rule fragments add
+ * MIME types without replacing the distribution-owned definition. Set lines
  * define parser state only; they do not become policy rule nodes.
  *
  * Returns: 0 on success, 1 on parse or allocation errors.
@@ -997,6 +1051,8 @@ static int parse_new_format(llist *l, lnode *n, int lineno,
 static int parse_set_line(attr_sets_t *sets, const char *line, int lineno)
 {
 	attr_sets_entry_t *set = NULL;
+	attr_sets_entry_t *existing;
+	bool append = false;
 
 	if (!line)
 		return 1;
@@ -1011,6 +1067,9 @@ static int parse_set_line(attr_sets_t *sets, const char *line, int lineno)
 		msg(LOG_ERR, "rules.conf:%d: parse_set_line: "
 			"Cannot parse line, no separator \"=\"", lineno);
 		goto free_and_error;
+	} else if (sep > l && sep[-1] == '+') {
+		append = true;
+		sep[-1] = '\0';
 	} else {
 		*sep = '\0';
 	}
@@ -1022,7 +1081,32 @@ static int parse_set_line(attr_sets_t *sets, const char *line, int lineno)
 	        goto free_and_error;
 	}
 
-	if (attr_sets_find(sets, name)) {
+	existing = attr_sets_find(sets, name);
+	if (append) {
+		/*
+		 * Keep mutable-set semantics confined to the policy's language
+		 * macro. General set appends could silently alter unrelated rules.
+		 */
+		if (strcmp(name, "languages") != 0) {
+			msg(LOG_ERR, "rules.conf:%d: parse_set_line: "
+				"set append is only supported for %%languages", lineno);
+			goto free_and_error;
+		}
+		if (!existing) {
+			msg(LOG_ERR, "rules.conf:%d: parse_set_line: "
+				"set languages must be defined before it can be extended",
+				lineno);
+			goto free_and_error;
+		}
+		if (append_language_set_values(existing,
+				fapolicyd_strtrim(sep + 1), lineno))
+			goto free_and_error;
+
+		free(l);
+		return 0;
+	}
+
+	if (existing) {
 		msg(LOG_ERR, "rules.conf:%d: parse_set_line: "
 			"set %s was already defined!", lineno, name);
 		goto free_and_error;

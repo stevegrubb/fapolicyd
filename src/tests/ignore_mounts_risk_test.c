@@ -6,8 +6,10 @@
 
 #include <error.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 bool verbose;
 
@@ -60,6 +62,58 @@ static void expect_dir_risk(const struct dir_case *test)
 	if (got != test->expected)
 		error(1, 0, "%s: expected 0x%x got 0x%x", test->label,
 		      test->expected, got);
+}
+
+/*
+ * test_language_mime_loading - load a base language set and package addition.
+ *
+ * The ignored-mount scanner must use the same effective %languages values as
+ * the daemon policy, including duplicate-safe += MIME additions.
+ * Returns nothing. Exits on test failure.
+ */
+static void test_language_mime_loading(void)
+{
+	char path[] = "/tmp/fapolicyd-language-rules.XXXXXX";
+	avl_tree_t languages;
+	FILE *fp;
+	int fd;
+
+	fd = mkstemp(path);
+	if (fd == -1)
+		error(1, errno, "mkstemp failed");
+	fp = fdopen(fd, "w");
+	if (fp == NULL) {
+		close(fd);
+		unlink(path);
+		error(1, errno, "fdopen failed");
+	}
+	if (fputs("%languages=text/x-python\n"
+		  "%languages+=application/x-vendor-script,text/x-python\n",
+		  fp) == EOF) {
+		fclose(fp);
+		unlink(path);
+		error(1, errno, "write language rules failed");
+	}
+	if (fclose(fp) == EOF) {
+		unlink(path);
+		error(1, errno, "write language rules failed");
+	}
+
+	avl_init(&languages, compare_language_entry);
+	if (load_language_mimes_from_file(&languages, path)) {
+		unlink(path);
+		error(1, 0, "language rule extensions did not load");
+	}
+	if (!mime_is_language(&languages, "text/x-python") ||
+	    !mime_is_language(&languages, "application/x-vendor-script")) {
+		free_language_mimes(&languages);
+		unlink(path);
+		error(1, 0, "loaded language MIME set was incomplete");
+	}
+
+	free_language_mimes(&languages);
+	if (unlink(path))
+		error(1, errno, "unlink failed");
 }
 
 int main(void)
@@ -136,6 +190,7 @@ int main(void)
 	avl_init(&languages, compare_language_entry);
 	if (insert_language_mime(&languages, "text/x-python"))
 		error(1, 0, "failed to add language MIME");
+	test_language_mime_loading();
 
 	for (unsigned int i = 0; risk_cases[i].label; i++)
 		expect_risk(&risk_cases[i]);

@@ -9,6 +9,7 @@
 - Add support for globbing in rules using explicit glob demarcation
 - Fix logging to syslog/journald to not deadlock on log rotation
 - Allow rules to express file/dir names with spaces using double quotes
+- Allow packages to append MIME types to the %languages policy set
 
 1.6
 - Many internal changes

@@ -14,6 +14,16 @@ organized into groups with the following meanings:
 80 - trusted execute
 90 - general open access to documents
 
+The installed 10-languages.rules file defines the %languages macro. A package
+that needs an additional MIME type can install a macro fragment ordered after
+that file and before policy rules, for example 11-vendor-languages.rules:
+
+%languages+=application/x-vendor-script
+
+The += form only adds MIME types to the existing %languages macro; it cannot
+create or replace the macro. Repeated MIME types are harmless. Run fagenrules
+after adding or removing a fragment so compiled.rules reflects the change.
+
 NFS servers that export language or other untrusted content can copy the
 optional 60-nfsd.rules unit into rules.d. It allows the kernel nfsd worker
 threads to open exported files before the language denial rules are reached.

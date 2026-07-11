@@ -344,6 +344,24 @@ Set is a named group of values of the same type. Fapolicyd internally distinguis
 .B allow uid=%uuids : all
 .fi
 
+.SS LANGUAGE SET EXTENSIONS
+The installed \fB%languages\fR set identifies MIME types that policy treats as
+language or interpreter content. A package may add a MIME type without
+modifying the distribution-owned definition by placing a naturally ordered
+macro fragment after \fI10-languages.rules\fR and before policy rules. For
+example, \fI11-vendor-languages.rules\fR can contain:
+
+.nf
+.B %languages+=application/x-vendor-script
+.fi
+
+The \fB+=\fR form is available only for \fB%languages\fR. It requires the base
+set to have been defined already, does not replace it, and treats an existing
+MIME type as a no-op. Run \fBfagenrules\fR after adding or removing a fragment.
+The added value must also be a MIME type emitted by fapolicyd's file type
+detector or the system magic database; adding it to the set alone does not add
+file type detection.
+
 .SH NOTES
 When writing rules, you should keep them focused to one goal and store them in one file. These rule files are kept in the /etc/fapolicyd/rules.d directory. During daemon startup,
 .B fagenrules
