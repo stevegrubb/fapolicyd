@@ -3157,18 +3157,19 @@ static int lmdb_scan_record(const char *rec, unsigned int *tsource,
 		p++;
 
 	/* --- size ----------------------------------------------------- */
+	trustdb_size_t stored_size;
+	unsigned long long parsed_size;
+
+	if (*p == '-')
+		return 1;
 	errno = 0;
-#if SIZE_MAX >= (1ULL << 32)
-	unsigned long long sval = strtoull(p, &end, 10);
-	if (end == p || errno == ERANGE)
+	parsed_size = strtoull(p, &end, 10);
+	if (end == p || errno == ERANGE ||
+	    (uintmax_t)parsed_size > UINT64_MAX)
 		return 1;
-	*size = (off_t)sval;
-#else
-	unsigned long sval = strtoul(p, &end, 10);
-	if (end == p || errno == ERANGE)
+	stored_size = (trustdb_size_t)parsed_size;
+	if (trustdb_size_to_off_t(stored_size, size))
 		return 1;
-	*size = (off_t)sval;
-#endif
 
 	/* skip whitespace */
 	p = end;
@@ -3540,7 +3541,7 @@ static int write_db(const char *idx, size_t idx_len, const char *data)
  *
  * Returns 0 on success or the write_db() stage code on failure.
  */
-int database_store_update_record(const char *path, size_t size,
+int database_store_update_record(const char *path, trustdb_size_t size,
 				 const char *hash)
 {
 	char data[BUFFER_SIZE];

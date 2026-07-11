@@ -13,6 +13,12 @@ a path containing a space in the shell, for example
 \fBfapolicyd-cli --file add "/tmp/first last/"\fP. In a version 3 trust file,
 \fB%20\fP is a literal percent sign followed by \fB20\fP, not a space.
 .sp
+The size field is an unsigned 64-bit byte count written in decimal. This
+fixed representation is intentionally independent of the native C
+\fBoff_t\fP and \fBsize_t\fP types, so trust records retain the same syntax
+on 32-bit and 64-bit builds. A record whose size cannot be represented by the
+native file-size type used for a filesystem comparison is rejected.
+.sp
 Version 2 trust files are accepted for compatibility and use their legacy
 percent escaping, including \fB%20\fP for a space. Newly rewritten trust files
 use version 3, so do not use version-2 percent escapes in new entries.

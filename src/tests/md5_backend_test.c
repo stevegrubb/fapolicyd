@@ -203,7 +203,7 @@ static void test_matching_file_records(void)
 	char buf[512];
 	char sha[FILE_DIGEST_STRING_MAX];
 	unsigned int source;
-	size_t size;
+	trustdb_size_t size;
 	char *data;
 	char *md5;
 	backend dst = { .name = "test", .memfd = make_memfd(), .entries = -1 };
@@ -223,7 +223,7 @@ static void test_matching_file_records(void)
 	CHECK(sscanf(data, DATA_FORMAT_IN, &source, &size, sha) == 3, 8,
 	      "[ERROR:8] snapshot data did not parse");
 	CHECK(source == SRC_DEB, 9, "[ERROR:9] snapshot source is not SRC_DEB");
-	CHECK(size == strlen(TEST_TEXT), 10,
+	CHECK(size == (trustdb_size_t)strlen(TEST_TEXT), 10,
 	      "[ERROR:10] snapshot size does not match file");
 
 	free(md5);

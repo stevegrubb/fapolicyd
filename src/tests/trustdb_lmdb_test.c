@@ -559,11 +559,11 @@ static int test_data_format_round_trip(void)
 	char data[TRUSTDB_DATA_BUFSZ];
 	char parsed_digest[FILE_DIGEST_STRING_MAX];
 	unsigned int tsource;
-	off_t size;
+	trustdb_size_t size;
 	int written;
 
 	written = snprintf(data, sizeof(data), DATA_FORMAT, SRC_RPM,
-			   (off_t)9400, digest);
+			   (trustdb_size_t)9400, digest);
 	CHECK(written >= 0 && written < (int)sizeof(data), 10,
 	      "[ERROR:10] DATA_FORMAT output truncated");
 
@@ -571,6 +571,49 @@ static int test_data_format_round_trip(void)
 	      11, "[ERROR:11] DATA_FORMAT_IN parse failed");
 	CHECK(strcmp(digest, parsed_digest) == 0, 12,
 	      "[ERROR:12] digest mismatch after round trip");
+	return 0;
+}
+
+/*
+ * test_lmdb_large_size_import - verify the stored size is not tied to size_t.
+ *
+ * A 32-bit build with large-file support has a 64-bit off_t but a 32-bit
+ * size_t.  Import must retain the 4 GiB value on that ABI.  A genuinely
+ * narrow off_t cannot compare such a record, so the parser must reject it.
+ *
+ * Returns 0 on success or a test-specific error code.
+ */
+static int test_lmdb_large_size_import(void)
+{
+	conf_t cfg;
+	char dir[128];
+	char payload[256];
+	long entries = 0;
+	int rc;
+	const char *path = "/usr/bin/large-size";
+	const char *digest =
+		"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
+	rc = with_temp_db(dir, sizeof(dir), &cfg);
+	CHECK(rc == 0, 13, "[ERROR:13] failed to open large-size LMDB");
+
+	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path,
+		 SRC_FILE_DB, UINT64_C(4294967296), digest);
+	rc = import_records(payload, &entries);
+	if (sizeof(off_t) >= sizeof(trustdb_size_t)) {
+		CHECK(rc == 0 && entries == 1, 14,
+		      "[ERROR:14] large-size record import failed");
+		CHECK(check_trust_database(path, NULL, -1) == 1, 15,
+		      "[ERROR:15] large-size record lookup failed");
+	} else {
+		CHECK(rc != 0, 16,
+		      "[ERROR:16] narrow off_t accepted large-size record");
+	}
+
+	database_close_for_tests();
+	database_set_location(NULL, NULL);
+	CHECK(remove_lmdb_files(dir) == 0, 17,
+	      "[ERROR:17] large-size LMDB cleanup failed");
 	return 0;
 }
 
@@ -589,7 +632,7 @@ static int test_lmdb_short_path_round_trip(void)
 	CHECK(rc == 0, 20, "[ERROR:20] failed to open temporary LMDB");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path,
-		 SRC_FILE_DB, (size_t)1234, digest);
+		 SRC_FILE_DB, (trustdb_size_t)1234, digest);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 1, 21,
 	      "[ERROR:21] short-path record import failed");
@@ -621,7 +664,7 @@ static int test_lmdb_long_path_round_trip(void)
 	CHECK(rc == 0, 31, "[ERROR:31] failed to open temporary LMDB");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path,
-		 SRC_FILE_DB, (size_t)2048, digest);
+		 SRC_FILE_DB, (trustdb_size_t)2048, digest);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 1, 32,
 	      "[ERROR:32] long-path record import failed");
@@ -667,8 +710,8 @@ static int test_lmdb_long_path_shared_prefix_no_collision(void)
 	 */
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n"
 		 "%s " DATA_FORMAT "\n",
-		 path_a, SRC_FILE_DB, (size_t)3000, digest_a,
-		 path_b, SRC_FILE_DB, (size_t)3001, digest_b);
+		 path_a, SRC_FILE_DB, (trustdb_size_t)3000, digest_a,
+		 path_b, SRC_FILE_DB, (trustdb_size_t)3001, digest_b);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 2, 42,
 	      "[ERROR:42] shared-prefix record import failed");
@@ -723,7 +766,7 @@ static int test_lmdb_readonly_probe_does_not_break_live_env(void)
 	CHECK(rc == 0, 60, "[ERROR:60] failed to open temporary LMDB");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n",
-		 "/usr/bin/probe-a", SRC_FILE_DB, (size_t)123, digest_a);
+		 "/usr/bin/probe-a", SRC_FILE_DB, (trustdb_size_t)123, digest_a);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 1, 61,
 	      "[ERROR:61] initial record import failed");
@@ -739,7 +782,7 @@ static int test_lmdb_readonly_probe_does_not_break_live_env(void)
 
 	entries = 0;
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n",
-		 "/usr/bin/probe-b", SRC_FILE_DB, (size_t)456, digest_b);
+		 "/usr/bin/probe-b", SRC_FILE_DB, (trustdb_size_t)456, digest_b);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 1, 65,
 	      "[ERROR:65] live environment import failed after probe close");
@@ -775,7 +818,7 @@ static int test_lmdb_readonly_lookup_keeps_dbi_valid(void)
 	CHECK(rc == 0, 250, "[ERROR:250] failed to open temporary LMDB");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n",
-		 trusted_path, SRC_FILE_DB, (size_t)789, digest);
+		 trusted_path, SRC_FILE_DB, (trustdb_size_t)789, digest);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 1, 251,
 	      "[ERROR:251] readonly lookup record import failed");
@@ -817,7 +860,7 @@ static int test_lmdb_readonly_helpers_create_lock_with_trust_mode(void)
 	CHECK(rc == 0, 255, "[ERROR:255] failed to open temporary LMDB");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n",
-		 trusted_path, SRC_FILE_DB, (size_t)321, digest);
+		 trusted_path, SRC_FILE_DB, (trustdb_size_t)321, digest);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 1, 256,
 	      "[ERROR:256] readonly lock-mode import failed");
@@ -879,7 +922,7 @@ static int test_lmdb_chunked_import(void)
 
 	for (unsigned int i = 0; i < record_count; i++) {
 		fprintf(stream, "/usr/bin/chunked-%04u " DATA_FORMAT "\n",
-			i, SRC_FILE_DB, (size_t)(9000 + i), digest);
+			i, SRC_FILE_DB, (trustdb_size_t)(9000 + i), digest);
 	}
 	fclose(stream);
 
@@ -922,7 +965,7 @@ static int test_lmdb_long_path_negative_lookup(void)
 	CHECK(rc == 0, 51, "[ERROR:51] failed to open temporary LMDB");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path_a,
-		 SRC_FILE_DB, (size_t)4100, digest);
+		 SRC_FILE_DB, (trustdb_size_t)4100, digest);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 1, 52,
 	      "[ERROR:52] negative-lookup record import failed");
@@ -967,7 +1010,7 @@ static int test_lmdb_concurrent_read_handles(void)
 	CHECK(rc == 0, 70, "[ERROR:70] failed to open temporary LMDB");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path,
-		 SRC_FILE_DB, (size_t)555, digest);
+		 SRC_FILE_DB, (trustdb_size_t)555, digest);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 1, 71,
 	      "[ERROR:71] concurrent record import failed");
@@ -1035,7 +1078,7 @@ static int test_lmdb_nested_read_transaction(void)
 	CHECK(rc == 0, 154, "[ERROR:154] failed to open temporary LMDB");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path,
-		 SRC_FILE_DB, (size_t)556, digest);
+		 SRC_FILE_DB, (trustdb_size_t)556, digest);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 1, 155,
 	      "[ERROR:155] nested record import failed");
@@ -1072,7 +1115,7 @@ static int test_lmdb_failed_candidate_preserves_generation(void)
 	CHECK(rc == 0, 100, "[ERROR:100] failed to open temporary LMDB");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path_a,
-		 SRC_FILE_DB, (size_t)100, digest_a);
+		 SRC_FILE_DB, (trustdb_size_t)100, digest_a);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 1, 101,
 	      "[ERROR:101] preserved record import failed");
@@ -1081,7 +1124,7 @@ static int test_lmdb_failed_candidate_preserves_generation(void)
 
 	flush_generation = object_cache_flush_generation_snapshot();
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path_b,
-		 SRC_FILE_DB, (size_t)200, digest_b);
+		 SRC_FILE_DB, (trustdb_size_t)200, digest_b);
 	rc = drop_candidate_records(payload);
 	CHECK(rc == 0, 103, "[ERROR:103] candidate import/drop failed");
 	CHECK(database_generation_report_for_tests(&after) == 0, 104,
@@ -1119,7 +1162,7 @@ static int test_lmdb_reload_failure_preserves_generation(void)
 	CHECK(rc == 0, 210, "[ERROR:210] failed to open temporary LMDB");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path,
-		 SRC_FILE_DB, (size_t)300, digest);
+		 SRC_FILE_DB, (trustdb_size_t)300, digest);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 1, 211,
 	      "[ERROR:211] reload-preserve record import failed");
@@ -1192,7 +1235,7 @@ static int test_lmdb_incremental_update_keeps_duplicate_hashes(void)
 	      "[ERROR:233] failed to publish SHA256 integrity config");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path,
-		 SRC_RPM, (size_t)old_info->size, old_hash);
+		 SRC_RPM, (trustdb_size_t)old_info->size, old_hash);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 1, 234,
 	      "[ERROR:234] old package record import failed");
@@ -1214,7 +1257,8 @@ static int test_lmdb_incremental_update_keeps_duplicate_hashes(void)
 	CHECK(check_trust_database(path, new_info, new_fd) == 0, 241,
 	      "[ERROR:241] replacement file trusted before incremental update");
 
-	rc = database_store_update_record(path, (size_t)new_info->size, new_hash);
+	rc = database_store_update_record(path, (trustdb_size_t)new_info->size,
+				  new_hash);
 	CHECK(rc == 0, 242, "[ERROR:242] incremental update failed");
 	CHECK(check_trust_database(path, new_info, new_fd) == 1, 243,
 	      "[ERROR:243] replacement file was not trusted after update");
@@ -1277,7 +1321,7 @@ static int test_lmdb_rpm_sha256_only_rejects_stale_sha1(void)
 	      "[ERROR:249] failed to publish SHA1-compatible config");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path,
-		 SRC_RPM, (size_t)info->size, sha1_hash);
+		 SRC_RPM, (trustdb_size_t)info->size, sha1_hash);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 1, 250,
 	      "[ERROR:250] SHA1 RPM record import failed");
@@ -1291,7 +1335,8 @@ static int test_lmdb_rpm_sha256_only_rejects_stale_sha1(void)
 	CHECK(check_trust_database(path, info, fd) == 0, 253,
 	      "[ERROR:253] stale SHA1 RPM record trusted in strict mode");
 
-	rc = database_store_update_record(path, (size_t)info->size, sha256_hash);
+	rc = database_store_update_record(path, (trustdb_size_t)info->size,
+				  sha256_hash);
 	CHECK(rc == 0, 256, "[ERROR:256] SHA256 duplicate update failed");
 	CHECK(check_trust_database(path, info, fd) == 1, 257,
 	      "[ERROR:257] SHA256 duplicate not trusted in strict mode");
@@ -1364,7 +1409,7 @@ static int test_lmdb_manual_resize_report_is_gated(void)
 	for (unsigned int i = 0; i < records; i++) {
 		int written = snprintf(payload + used, records * 192 - used,
 			"/usr/bin/resize-report-%04u " DATA_FORMAT "\n",
-			i, SRC_FILE_DB, (size_t)(1000 + i), digest);
+			i, SRC_FILE_DB, (trustdb_size_t)(1000 + i), digest);
 
 		CHECK(written > 0 && (size_t)written < records * 192 - used,
 		      114, "[ERROR:114] resize report payload truncated");
@@ -1422,7 +1467,7 @@ static int test_lmdb_startup_generation_resets(void)
 	CHECK(rc == 0, 160, "[ERROR:160] failed to open temporary LMDB");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path_a,
-		 SRC_FILE_DB, (size_t)100, digest);
+		 SRC_FILE_DB, (trustdb_size_t)100, digest);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 1, 161,
 	      "[ERROR:161] startup generation initial import failed");
@@ -1432,7 +1477,7 @@ static int test_lmdb_startup_generation_resets(void)
 	      "[ERROR:163] initial generation did not start at one");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path_b,
-		 SRC_FILE_DB, (size_t)200, digest);
+		 SRC_FILE_DB, (trustdb_size_t)200, digest);
 	rc = publish_records(&cfg, payload);
 	CHECK(rc == 0, 164,
 	      "[ERROR:164] runtime generation publish failed");
@@ -1452,7 +1497,7 @@ static int test_lmdb_startup_generation_resets(void)
 	      "[ERROR:170] reopened generation lookup failed");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path_c,
-		 SRC_FILE_DB, (size_t)300, digest);
+		 SRC_FILE_DB, (trustdb_size_t)300, digest);
 	rc = publish_startup_records(&cfg, payload);
 	CHECK(rc == 0, 171,
 	      "[ERROR:171] startup rebuild publish failed");
@@ -1462,7 +1507,7 @@ static int test_lmdb_startup_generation_resets(void)
 	      "[ERROR:173] startup rebuild did not reset generation");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path_d,
-		 SRC_FILE_DB, (size_t)400, digest);
+		 SRC_FILE_DB, (trustdb_size_t)400, digest);
 	rc = publish_records(&cfg, payload);
 	CHECK(rc == 0, 174,
 	      "[ERROR:174] post-startup runtime publish failed");
@@ -1498,7 +1543,7 @@ static int test_lmdb_offline_compaction_swaps_environment(void)
 	CHECK(rc == 0, 180, "[ERROR:180] failed to open temporary LMDB");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path_a,
-		 SRC_FILE_DB, (size_t)500, digest_a);
+		 SRC_FILE_DB, (trustdb_size_t)500, digest_a);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 1, 181,
 	      "[ERROR:181] offline initial import failed");
@@ -1509,7 +1554,7 @@ static int test_lmdb_offline_compaction_swaps_environment(void)
 
 	flush_generation = object_cache_flush_generation_snapshot();
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path_b,
-		 SRC_FILE_DB, (size_t)600, digest_b);
+		 SRC_FILE_DB, (trustdb_size_t)600, digest_b);
 	{
 		int fd = make_memfd_input(payload);
 
@@ -1557,7 +1602,7 @@ static int test_lmdb_offline_compaction_preserves_busy_environment(void)
 	CHECK(rc == 0, 193, "[ERROR:193] failed to open temporary LMDB");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path_a,
-		 SRC_FILE_DB, (size_t)700, digest);
+		 SRC_FILE_DB, (trustdb_size_t)700, digest);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 1, 194,
 	      "[ERROR:194] preserve initial import failed");
@@ -1569,7 +1614,7 @@ static int test_lmdb_offline_compaction_preserves_busy_environment(void)
 	      "[ERROR:196] preserve generation hold failed");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path_b,
-		 SRC_FILE_DB, (size_t)800, digest);
+		 SRC_FILE_DB, (trustdb_size_t)800, digest);
 	{
 		int fd = make_memfd_input(payload);
 
@@ -1619,7 +1664,7 @@ static int test_lmdb_held_reader_delays_reclamation(void)
 	CHECK(rc == 0, 120, "[ERROR:120] failed to open temporary LMDB");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path_a,
-		 SRC_FILE_DB, (size_t)300, digest_a);
+		 SRC_FILE_DB, (trustdb_size_t)300, digest_a);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 1, 121,
 	      "[ERROR:121] held-reader initial import failed");
@@ -1628,7 +1673,7 @@ static int test_lmdb_held_reader_delays_reclamation(void)
 	CHECK(held != NULL, 122, "[ERROR:122] failed to hold generation");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path_b,
-		 SRC_FILE_DB, (size_t)400, digest_b);
+		 SRC_FILE_DB, (trustdb_size_t)400, digest_b);
 	rc = publish_records(&cfg, payload);
 	CHECK(rc == 0, 123, "[ERROR:123] held-reader publish failed");
 	CHECK(database_generation_report_for_tests(&report) == 0, 124,
@@ -1680,7 +1725,7 @@ static int test_lmdb_concurrent_publish_storm(void)
 	CHECK(rc == 0, 140, "[ERROR:140] failed to open temporary LMDB");
 
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n",
-		 stable_path, SRC_FILE_DB, (size_t)500, digest);
+		 stable_path, SRC_FILE_DB, (trustdb_size_t)500, digest);
 	rc = import_records(payload, &entries);
 	CHECK(rc == 0 && entries == 1, 141,
 	      "[ERROR:141] reload-storm initial import failed");
@@ -1704,8 +1749,9 @@ static int test_lmdb_concurrent_publish_storm(void)
 		snprintf(payload, sizeof(payload),
 			 "%s " DATA_FORMAT "\n"
 			 "/usr/bin/reload-storm-%u " DATA_FORMAT "\n",
-			 stable_path, SRC_FILE_DB, (size_t)(600 + i), digest,
-			 i, SRC_FILE_DB, (size_t)(700 + i), digest);
+			 stable_path, SRC_FILE_DB,
+			 (trustdb_size_t)(600 + i), digest,
+			 i, SRC_FILE_DB, (trustdb_size_t)(700 + i), digest);
 		rc = publish_records(&cfg, payload);
 		CHECK(rc == 0, 144,
 		      "[ERROR:144] reload-storm publish failed");
@@ -1748,6 +1794,10 @@ int main(void)
 	int rc;
 
 	rc = test_data_format_round_trip();
+	if (rc)
+		return rc;
+
+	rc = test_lmdb_large_size_import();
 	if (rc)
 		return rc;
 

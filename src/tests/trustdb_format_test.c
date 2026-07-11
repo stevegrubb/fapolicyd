@@ -13,18 +13,32 @@ int main(void)
 	char data[TRUSTDB_DATA_BUFSZ];
 	char parsed_digest[FILE_DIGEST_STRING_MAX];
 	unsigned int tsource;
-	off_t size;
+	trustdb_size_t size;
+	trustdb_size_t expected_size = UINT64_C(4294967296);
+	off_t native_size;
 	int written;
 
-	written = snprintf(data, sizeof(data), DATA_FORMAT, SRC_RPM, (off_t)9400,
-			 digest);
+	written = snprintf(data, sizeof(data), DATA_FORMAT, SRC_RPM,
+			   expected_size, digest);
 	if (written < 0 || written >= (int)sizeof(data))
 		return 1;
 
 	if (sscanf(data, DATA_FORMAT_IN, &tsource, &size, parsed_digest) != 3)
 		return 1;
 
-	if (strcmp(digest, parsed_digest))
+	if (size != expected_size || strcmp(digest, parsed_digest))
+		return 1;
+
+	/* Large-file off_t builds must retain a size above 32-bit range. */
+	if (sizeof(off_t) >= sizeof(expected_size)) {
+		if (trustdb_size_to_off_t(size, &native_size) ||
+		    (trustdb_size_t)native_size != size)
+			return 1;
+	} else if (trustdb_size_to_off_t(size, &native_size) == 0)
+		return 1;
+
+	if (trustdb_size_from_signed(-1, &size) == 0 ||
+	    trustdb_size_to_off_t(UINT64_MAX, &native_size) == 0)
 		return 1;
 
 	return 0;

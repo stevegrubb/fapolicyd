@@ -356,7 +356,7 @@ static int handle_update_record(const char *buffer)
 {
 	char path[2048 + 1];
 	char hash[64 + 1];
-	size_t size;
+	trustdb_size_t size;
 	int rc;
 	int res;
 
@@ -364,7 +364,8 @@ static int handle_update_record(const char *buffer)
 		return 1;
 
 	// validating input
-	res = sscanf(buffer, "%2048s %zu %64s", path, &size, hash);
+	res = sscanf(buffer, "%2048s %" SCNu64 " %64s", path, &size,
+		     hash);
 	msg(LOG_DEBUG, "update_thread: Parsing input buffer: %s", buffer);
 	msg(LOG_DEBUG,
 	    "update_thread: Parsing input words(expected 3): %d",

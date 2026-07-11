@@ -104,6 +104,13 @@ md5_backend_result_t add_file_to_backend_by_md5(const char *path,
 	}
 
 	size_t file_size = path_stat.st_size;
+	trustdb_size_t stored_size;
+
+	if (trustdb_size_from_unsigned(file_size, &stored_size)) {
+		close(fd);
+		msg(LOG_ERR, "File size for %s exceeds trust DB format", path);
+		return MD5_BACKEND_FATAL;
+	}
 
 	#ifdef DEBUG
 	msg(LOG_DEBUG, "\tFile size: %zu", file_size);
@@ -136,7 +143,8 @@ md5_backend_result_t add_file_to_backend_by_md5(const char *path,
 	}
 
 	char *data;
-	if (asprintf(&data, DATA_FORMAT, trust_src, file_size, sha_digest) == -1) {
+	if (asprintf(&data, DATA_FORMAT, trust_src, stored_size,
+		    sha_digest) == -1) {
 		msg(LOG_ERR, "Out of memory formatting trust data for %s", path);
 		free(sha_digest);
 		return MD5_BACKEND_FATAL;

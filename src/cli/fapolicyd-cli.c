@@ -285,7 +285,7 @@ static int do_dump_db(void)
 	do {
 		char *path = NULL, *data = NULL, sha[FILE_DIGEST_STRING_MAX];
 		unsigned int tsource;
-		size_t size;
+		trustdb_size_t size;
 		const char *source;
 
 		path = malloc(key.mv_size + 1);
@@ -306,7 +306,7 @@ static int do_dump_db(void)
 			goto next_record;
 
 		source = lookup_tsource(tsource);
-		printf("%s %s %zu %s\n", source, path, size, sha);
+		printf("%s %s %" PRIu64 " %s\n", source, path, size, sha);
 
 next_record:
 		free(data);
@@ -870,6 +870,7 @@ static int check_trustdb(void)
 
 	do {
 		unsigned int tsource;
+		trustdb_size_t stored_size;
 		off_t size;
 		char sha[FILE_DIGEST_STRING_MAX];
 		char path[448];
@@ -881,7 +882,8 @@ static int check_trustdb(void)
 			(char *) entry->path.mv_data);
 		snprintf(data, sizeof(data), "%.*s", (int) entry->data.mv_size,
 			(char *) entry->data.mv_data);
-		if (sscanf(data, DATA_FORMAT_IN, &tsource, &size, sha) != 3) {
+		if (sscanf(data, DATA_FORMAT_IN, &tsource, &stored_size, sha) != 3 ||
+		    trustdb_size_to_off_t(stored_size, &size)) {
 			fprintf(stderr, "%s data entry is corrupted\n", path);
 			continue;
 		}

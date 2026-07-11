@@ -60,7 +60,9 @@
  * their documentation.
  */
 
-#define BUFFER_SIZE (PATH_MAX+1+1+1+10+1+FILE_DIGEST_STRING_WIDTH+1)
+/* Path, separators, fixed-width trust DB size, digest, and NUL terminator. */
+#define BUFFER_SIZE (PATH_MAX + 1 + 1 + TRUSTDB_SIZE_DECIMAL_DIGITS + \
+		     1 + FILE_DIGEST_STRING_WIDTH + 1)
 #define FTW_NOPENFD 1024
 #define FTW_FLAGS (FTW_ACTIONRETVAL | FTW_PHYS)
 
@@ -96,6 +98,7 @@ struct trust_seen_entry {
 static char *make_data_string(const char *path)
 {
 	int fd = open(path, O_RDONLY);
+	trustdb_size_t size;
 	if (fd < 0) {
 		msg(LOG_ERR, "Cannot open %s", path);
 		return NULL;
@@ -105,6 +108,11 @@ static char *make_data_string(const char *path)
 	struct stat sb;
 	if (fstat(fd, &sb)) {
 		msg(LOG_ERR, "Cannot stat %s", path);
+		close(fd);
+		return NULL;
+	}
+	if (trustdb_size_from_signed((intmax_t)sb.st_size, &size)) {
+		msg(LOG_ERR, "Cannot store invalid file size for %s", path);
 		close(fd);
 		return NULL;
 	}
@@ -127,8 +135,7 @@ static char *make_data_string(const char *path)
 	 * source size sha256
 	 * path is stored as lmdb index
 	 */
-	int count = asprintf(&line, DATA_FORMAT, 0,
-					  sb.st_size, hash);
+	int count = asprintf(&line, DATA_FORMAT, 0, size, hash);
 
 	free(hash);
 
@@ -234,7 +241,7 @@ int trust_file_append(const char *fpath, list_t *list)
  *
  * Returns 0 when parsing succeeds or -1 when the line is malformed.
  */
-static int parse_line_backwards(char *line, char *path, size_t *size,
+static int parse_line_backwards(char *line, char *path, trustdb_size_t *size,
 				 char *sha, size_t sha_size)
 {
 	if (line == NULL || path == NULL || size == NULL || sha == NULL ||
@@ -278,10 +285,13 @@ static int parse_line_backwards(char *line, char *path, size_t *size,
 	// save size to arg
 	char *endptr;
 	errno = 0;
-	unsigned long long parsed_size = strtoull(delims[1] + 1, &endptr, 10);
-	if (errno || endptr == delims[1] + 1 || *endptr != '\0')
+	if (*(delims[1] + 1) == '-')
 		return -1;
-	*size = parsed_size;
+	unsigned long long parsed_size = strtoull(delims[1] + 1, &endptr, 10);
+	if (errno || endptr == delims[1] + 1 || *endptr != '\0' ||
+	    (uintmax_t)parsed_size > UINT64_MAX)
+		return -1;
+	*size = (trustdb_size_t)parsed_size;
 
 	// save path to arg
 	size_t path_size = delims[1] - line;
@@ -319,7 +329,7 @@ int trust_file_load(const char *fpath, list_t *list, int memfd)
 		char name[PATH_MAX+1], sha[FILE_DIGEST_STRING_MAX], *index = NULL,
 			*data = NULL;
 		char data_buf[BUFFER_SIZE];
-		size_t sz;
+		trustdb_size_t sz;
 		unsigned int tsource = SRC_FILE_DB;
 
 		line++;

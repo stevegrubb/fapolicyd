@@ -415,7 +415,7 @@ int do_rpm_load_list(const conf_t *conf, int memfd)
 			if (file_name == NULL)
 				continue;
 
-			rpm_loff_t sz = get_file_size_rpm();
+			trustdb_size_t sz = get_file_size_rpm();
 			int len;
 			const char *sha = get_sha256_rpm(&len);
 			char *data;
