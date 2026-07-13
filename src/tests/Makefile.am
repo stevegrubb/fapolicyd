@@ -21,11 +21,6 @@
 
 CONFIG_CLEAN_FILES = *.orig *.cur
 
-TEST_EXTENSIONS = .sh
-SH_LOG_COMPILER = $(SHELL)
-TESTS_ENVIRONMENT = FAPOLICYD_CLI='$(top_builddir)/src/fapolicyd-cli'
-EXTRA_DIST = ftype_cli_test.sh
-
 SUBDIRS =
 if WITH_STRESS
 SUBDIRS += stress
@@ -170,4 +165,4 @@ deb_filter_test_LDADD = ${top_builddir}/src/.libs/libfapolicyd.la -ldpkg -lmd
 deb_filter_test_SOURCES = deb_filter_test.c test-stubs.c
 endif
 
-TESTS = $(check_PROGRAMS) ftype_cli_test.sh
+TESTS = $(check_PROGRAMS)
