@@ -43,6 +43,9 @@ void decision_worker_pool_defer_age_report(FILE *f);
 void decision_worker_pool_defer_health_report(FILE *f);
 
 #ifdef TEST_SUBJECT_DEFER
+#include <sys/timerfd.h>
+#include <time.h>
+
 int test_notify_queue_reset(unsigned int entries);
 void test_notify_queue_destroy(void);
 int test_notify_queue_push(const decision_event_t *event);
@@ -62,6 +65,9 @@ int test_notify_enqueue_pid_fd(pid_t pid, int event_fd);
 unsigned int test_notify_worker_queue_depth(unsigned int worker_id);
 unsigned int test_notify_worker_drain(unsigned int worker_id, pid_t *pids,
 		int *fds, unsigned int max);
+int test_notify_report_timer_init(unsigned int interval, struct timespec *timeout,
+		struct itimerspec *timer);
+void test_notify_report_timer_destroy(void);
 #endif
 
 #endif

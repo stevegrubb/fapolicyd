@@ -950,21 +950,29 @@ static void rpt_disable(const char *why)
 // initialize interval reporting
 static void rpt_init(struct timespec *t)
 {
+	struct itimerspec rpt_deadline;
+
+	t->tv_nsec = t->tv_sec = 0;
 	rpt_timer_fd = timerfd_create(CLOCK_REALTIME, TFD_NONBLOCK);
 	if (rpt_timer_fd == -1) {
 		rpt_disable("timer create failure");
+		return;
+	}
+	if (clock_gettime(CLOCK_REALTIME, t)) {
+		// gettime errors are unrecoverable
+		rpt_disable("clock failure");
+		return;
+	}
+	t->tv_sec += rpt_interval;
+	rpt_deadline.it_interval.tv_sec = rpt_interval;
+	rpt_deadline.it_interval.tv_nsec = 0;
+	rpt_deadline.it_value = *t;
+	if (timerfd_settime(rpt_timer_fd, TFD_TIMER_ABSTIME,
+			    &rpt_deadline, NULL) == -1) {
+		// settime errors are unrecoverable
+		rpt_disable(strerror(errno));
 	} else {
-		t->tv_nsec = t->tv_sec = 0;
-		struct itimerspec rpt_deadline = { {rpt_interval, 0},
-						 {rpt_interval, 0} };
-		if (timerfd_settime(rpt_timer_fd, TFD_TIMER_ABSTIME,
-				    &rpt_deadline, NULL) == -1) {
-			// settime errors are unrecoverable
-			rpt_disable(strerror(errno));
-		} else {
-			msg(LOG_INFO, "interval reports configured; %us",
-			    rpt_interval);
-		}
+		msg(LOG_INFO, "interval reports configured; %us", rpt_interval);
 	}
 }
 
@@ -1532,6 +1540,44 @@ unsigned int test_notify_worker_drain(unsigned int worker_id, pid_t *pids,
 	}
 
 	return count;
+}
+
+/*
+ * test_notify_report_timer_init - expose report timer setup to unit tests.
+ * @interval: report interval in seconds.
+ * @timeout: destination for the first queue timeout.
+ * @timer: destination for the active timer state.
+ *
+ * Returns zero after configuring the timer, or -1 on setup/read failure.
+ */
+int test_notify_report_timer_init(unsigned int interval, struct timespec *timeout,
+		struct itimerspec *timer)
+{
+	if (timeout == NULL || timer == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	rpt_interval = interval;
+	rpt_init(timeout);
+	if (rpt_timer_fd == -1)
+		return -1;
+
+	return timerfd_gettime(rpt_timer_fd, timer);
+}
+
+/*
+ * test_notify_report_timer_destroy - release report timer state after tests.
+ *
+ * Returns nothing.
+ */
+void test_notify_report_timer_destroy(void)
+{
+	if (rpt_timer_fd != -1) {
+		close(rpt_timer_fd);
+		rpt_timer_fd = -1;
+	}
+	rpt_interval = 0;
 }
 #endif
 

@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/fanotify.h>
+#include <sys/timerfd.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "failure-action.h"
@@ -912,6 +914,33 @@ static void test_deferred_dispatch_refreshes_health(void)
 }
 
 /*
+ * test_interval_report_deadline - interval reports must not start at epoch.
+ *
+ * The queue timeout and timerfd deadline must describe the first configured
+ * interval. An absolute value containing only the interval is already in the
+ * past, which makes the timer fire as soon as the worker starts.
+ *
+ * Returns nothing. Exits on test failure.
+ */
+static void test_interval_report_deadline(void)
+{
+	struct timespec before, timeout;
+	struct itimerspec timer;
+
+	CHECK(clock_gettime(CLOCK_REALTIME, &before) == 0, 168,
+	      "[ERROR:168] failed to read report timer clock");
+	CHECK(test_notify_report_timer_init(5, &timeout, &timer) == 0, 169,
+	      "[ERROR:169] failed to initialize report timer");
+	CHECK(timeout.tv_sec >= before.tv_sec + 5, 170,
+	      "[ERROR:170] initial report timeout was not in the future");
+	CHECK(timer.it_interval.tv_sec == 5 && timer.it_interval.tv_nsec == 0,
+	      171, "[ERROR:171] report timer interval changed");
+	CHECK(timer.it_value.tv_sec >= 4, 172,
+	      "[ERROR:172] report timer expired before its first interval");
+	test_notify_report_timer_destroy();
+}
+
+/*
  * main - exercise synthetic FAN_NOFD kernel metadata.
  * Returns 0 on success. Exits with error() on test failure.
  */
@@ -940,6 +969,7 @@ int main(void)
 	test_dispatcher_worker_skew();
 	test_notify_queue_report_reset();
 	test_deferred_dispatch_refreshes_health();
+	test_interval_report_deadline();
 
 	before = getKernelQueueOverflow();
 	metadata.mask = 0;
