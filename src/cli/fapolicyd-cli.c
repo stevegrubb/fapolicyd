@@ -576,6 +576,25 @@ static int do_reload(int code)
 {
 	int fd = -1;
 	struct stat s;
+	char command;
+	char str[2];
+	ssize_t ret;
+
+	switch (code) {
+	case DB:
+		command = RELOAD_TRUSTDB_COMMAND;
+		break;
+	case RULES:
+		command = RELOAD_RULES_COMMAND;
+		break;
+	case COMPACT:
+		command = COMPACT_TRUSTDB_COMMAND;
+		break;
+	default:
+		return CLI_EXIT_INTERNAL;
+	}
+	str[0] = command;
+	str[1] = '\n';
 
 	fd = open(fifo_path, O_WRONLY);
 	if (fd == -1) {
@@ -607,22 +626,17 @@ static int do_reload(int code)
 		}
 	}
 
-	ssize_t ret = 0;
-	char str[32] = {0};
+	do {
+		ret = write(fd, str, sizeof(str));
+	} while (ret == -1 && errno == EINTR);
 
-	if (code == DB) {
-		snprintf(str, 32, "%c\n", RELOAD_TRUSTDB_COMMAND);
-		ret = write(fd, str, strlen(str));
-	} else if (code == RULES) {
-		snprintf(str, 32, "%c\n", RELOAD_RULES_COMMAND);
-		ret = write(fd, str, strlen(str));
-	} else if (code == COMPACT) {
-		snprintf(str, 32, "%c\n", COMPACT_TRUSTDB_COMMAND);
-		ret = write(fd, str, strlen(str));
-	}
-
-	if (ret == -1) {
-		fprintf(stderr,"Write: %s -> %s\n", fifo_path, strerror(errno));
+	if (ret != (ssize_t)sizeof(str)) {
+		if (ret < 0)
+			fprintf(stderr, "Write: %s -> %s\n", fifo_path,
+				strerror(errno));
+		else
+			fprintf(stderr, "Write: %s -> short write (%zd of %zu bytes)\n",
+				fifo_path, ret, sizeof(str));
 		close(fd);
 		return CLI_EXIT_DAEMON_IPC;
 	}
