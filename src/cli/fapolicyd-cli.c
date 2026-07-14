@@ -203,7 +203,13 @@ static int do_dump_db(void)
 							mdb_strerror(rc));
 		return CLI_EXIT_DB_ERROR;
 	}
-	mdb_env_set_maxdbs(env, 128);
+	rc = mdb_env_set_maxdbs(env, 128);
+	if (rc) {
+		fprintf(stderr, "mdb_env_set_maxdbs failed, error %d %s\n", rc,
+				mdb_strerror(rc));
+		exit_rc = CLI_EXIT_DB_ERROR;
+		goto env_close;
+	}
 	/*
 	 * Dumping walks the live database while the daemon may reload trust DB
 	 * generations, so this read-only transaction must enter LMDB's reader
