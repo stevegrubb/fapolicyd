@@ -116,6 +116,20 @@ static void test_language_mime_loading(void)
 		error(1, errno, "unlink failed");
 }
 
+/*
+ * nftw() supplies no valid stat buffer when it reports FTW_NS. The callback
+ * must report the incomplete scan without dereferencing that buffer.
+ */
+static void test_unstatable_walk_entry(void)
+{
+	if (inspect_mount_entry("/unstatable", NULL, FTW_NS, NULL) !=
+	    FTW_CONTINUE)
+		error(1, 0, "FTW_NS callback stopped the walk");
+	if (scan_state.had_error == 0)
+		error(1, 0, "FTW_NS callback did not report a scan error");
+	scan_state.had_error = 0;
+}
+
 int main(void)
 {
 	avl_tree_t languages;
@@ -191,6 +205,7 @@ int main(void)
 	if (insert_language_mime(&languages, "text/x-python"))
 		error(1, 0, "failed to add language MIME");
 	test_language_mime_loading();
+	test_unstatable_walk_entry();
 
 	for (unsigned int i = 0; risk_cases[i].label; i++)
 		expect_risk(&risk_cases[i]);

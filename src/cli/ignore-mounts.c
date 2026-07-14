@@ -831,6 +831,14 @@ static int inspect_mount_entry(const char *fpath, const struct stat *sb,
 	char *mime;
 	unsigned int risks;
 
+	/* nftw() does not initialize sb for FTW_NS entries. */
+	if (typeflag == FTW_NS || typeflag == FTW_DNR) {
+		fprintf(stderr, "Unable to inspect %s during ignored-mount scan\n",
+			fpath);
+		scan_state.had_error = 1;
+		return FTW_CONTINUE;
+	}
+
 	if (typeflag == FTW_D || typeflag == FTW_DP) {
 		risks = classify_dir_risks(fpath);
 		record_risk_entry(fpath, risks, NULL);
@@ -838,7 +846,7 @@ static int inspect_mount_entry(const char *fpath, const struct stat *sb,
 	}
 
 	/* Only evaluate regular files discovered during the walk. */
-	if (S_ISREG(sb->st_mode) == 0)
+	if (typeflag != FTW_F || S_ISREG(sb->st_mode) == 0)
 		return FTW_CONTINUE;
 
 	/* Open the file and collect metadata for libmagic. */

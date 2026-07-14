@@ -958,14 +958,21 @@ static int is_link(const char *path)
 
 // Check that the file is in the trust db
 static int path_found = 0;
+static int path_scan_error = 0;
 static int check_file(const char *fpath,
 		const struct stat *sb,
-		int typeflag_unused __attribute__ ((unused)),
+		int typeflag,
 		struct FTW *s_unused __attribute__ ((unused)))
 {
 	int ret = FTW_CONTINUE;
 
-	if (S_ISREG(sb->st_mode) == 0)
+	/* nftw() leaves sb undefined for FTW_NS entries. */
+	if (typeflag == FTW_NS || typeflag == FTW_DNR) {
+		fprintf(stderr, "Unable to inspect %s during PATH scan\n", fpath);
+		path_scan_error = 1;
+		return ret;
+	}
+	if (typeflag != FTW_F || S_ISREG(sb->st_mode) == 0)
 		return ret;
 
 	int fd = open(fpath, O_RDONLY|O_CLOEXEC);
@@ -986,6 +993,7 @@ static int check_file(const char *fpath,
 static int check_path(void)
 {
 	char *ptr, *saved;
+	int link, walk_rc;
 	const char *env_path = getenv("PATH");
 	if (env_path == NULL) {
 		puts("PATH not found");
@@ -1012,13 +1020,24 @@ static int check_path(void)
 		reset_config();
 		return CLI_EXIT_DB_ERROR;
 	}
+	path_found = 0;
+	path_scan_error = 0;
 	char *path = strdup(env_path);
 	ptr = strtok_r(path, ":", &saved);
 	while (ptr) {
-		if (is_link(ptr))
+		link = is_link(ptr);
+		if (link) {
+			if (link < 0)
+				path_scan_error = 1;
 			goto next;
+		}
 
-		nftw(ptr, check_file, 1024, FTW_PHYS);
+		walk_rc = nftw(ptr, check_file, 1024, FTW_PHYS);
+		if (walk_rc) {
+			fprintf(stderr, "Unable to scan %s (%s)\n", ptr,
+				strerror(errno));
+			path_scan_error = 1;
+		}
 next:
 		ptr = strtok_r(NULL, ":", &saved);
 	}
@@ -1026,8 +1045,10 @@ next:
 	database_readonly_lookup_finish();
 	reset_config();
 
-	if (path_found == 0)
+	if (path_found == 0 && path_scan_error == 0)
 		puts("No problems found");
+	if (path_scan_error)
+		return CLI_EXIT_IO;
 
 	return CLI_EXIT_SUCCESS;
 }
