@@ -773,6 +773,10 @@ static int check_watch_fs(void)
 
 			// Remove the file system so that we get 1 report
 			char *tmpfs = strdup(lptr->index);
+			if (tmpfs == NULL) {
+				alloc_err = 1;
+				break;
+			}
 			while (list_remove(&mnt, tmpfs))
                                 ;
 			free(tmpfs);
@@ -1033,6 +1037,12 @@ static int check_path(void)
 	path_found = 0;
 	path_scan_error = 0;
 	char *path = strdup(env_path);
+	if (path == NULL) {
+		fprintf(stderr, "Out of memory while reading PATH\n");
+		database_readonly_lookup_finish();
+		reset_config();
+		return CLI_EXIT_INTERNAL;
+	}
 	ptr = strtok_r(path, ":", &saved);
 	while (ptr) {
 		link = is_link(ptr);
