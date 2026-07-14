@@ -941,6 +941,28 @@ static void test_interval_report_deadline(void)
 }
 
 /*
+ * test_interval_report_disable_closes_timer - invalidate a disabled timer.
+ *
+ * A later pool cleanup must not close an unrelated descriptor after the
+ * operating system reuses the report timer's descriptor number.
+ *
+ * Returns nothing. Exits on test failure.
+ */
+static void test_interval_report_disable_closes_timer(void)
+{
+	struct timespec timeout;
+	struct itimerspec timer;
+
+	CHECK(test_notify_report_timer_init(5, &timeout, &timer) == 0, 173,
+	      "[ERROR:173] failed to initialize report timer for disable");
+	CHECK(test_notify_report_timer_fd() != -1, 174,
+	      "[ERROR:174] report timer descriptor was not active");
+	test_notify_report_timer_disable();
+	CHECK(test_notify_report_timer_fd() == -1, 175,
+	      "[ERROR:175] disabled report timer kept its descriptor");
+}
+
+/*
  * main - exercise synthetic FAN_NOFD kernel metadata.
  * Returns 0 on success. Exits with error() on test failure.
  */
@@ -970,6 +992,7 @@ int main(void)
 	test_notify_queue_report_reset();
 	test_deferred_dispatch_refreshes_health();
 	test_interval_report_deadline();
+	test_interval_report_disable_closes_timer();
 
 	before = getKernelQueueOverflow();
 	metadata.mask = 0;

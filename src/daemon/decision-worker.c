@@ -943,7 +943,10 @@ void decision_worker_pool_defer_health_report(FILE *f)
 static void rpt_disable(const char *why)
 {
 	rpt_interval = 0;
-	close(rpt_timer_fd);
+	if (rpt_timer_fd != -1) {
+		close(rpt_timer_fd);
+		rpt_timer_fd = -1;
+	}
 	msg(LOG_INFO, "interval reports disabled; %s", why);
 }
 
@@ -1578,6 +1581,26 @@ void test_notify_report_timer_destroy(void)
 		rpt_timer_fd = -1;
 	}
 	rpt_interval = 0;
+}
+
+/*
+ * test_notify_report_timer_disable - run the report timer error cleanup.
+ *
+ * Returns nothing.
+ */
+void test_notify_report_timer_disable(void)
+{
+	rpt_disable("test failure");
+}
+
+/*
+ * test_notify_report_timer_fd - return the active report timer descriptor.
+ *
+ * Returns -1 when report timing is disabled.
+ */
+int test_notify_report_timer_fd(void)
+{
+	return rpt_timer_fd;
 }
 #endif
 

@@ -68,6 +68,8 @@ unsigned int test_notify_worker_drain(unsigned int worker_id, pid_t *pids,
 int test_notify_report_timer_init(unsigned int interval, struct timespec *timeout,
 		struct itimerspec *timer);
 void test_notify_report_timer_destroy(void);
+void test_notify_report_timer_disable(void);
+int test_notify_report_timer_fd(void);
 #endif
 
 #endif
