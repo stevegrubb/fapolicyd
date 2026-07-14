@@ -57,11 +57,15 @@ int mlist_append(mlist *m, const char *p)
 {
         mnode* newnode;
 
-	if (p) {
+	if (m && p) {
 		newnode = malloc(sizeof(mnode));
 		if (newnode == NULL)
 			return 1;
 		newnode->path = strdup(p);
+		if (newnode->path == NULL) {
+			free(newnode);
+			return 1;
+		}
 		newnode->status = MNT_ADD;
 	} else
 		return 1;
@@ -79,6 +83,49 @@ int mlist_append(mlist *m, const char *p)
 	m->cur = newnode;
 
 	return 0;
+}
+
+/*
+ * mlist_reconcile - merge a complete replacement list into the active list.
+ * @m: active mount list whose status fields drive fanotify updates.
+ * @next: fully parsed mount list that transfers new node ownership to @m.
+ *
+ * Parsing into @next first keeps @m unchanged if reading /proc/mounts or an
+ * allocation fails. Matching paths retain their marks, missing paths become
+ * deletions, and new nodes are moved without another allocation.
+ *
+ * Returns nothing.
+ */
+void mlist_reconcile(mlist *m, mlist *next)
+{
+	mnode *node;
+
+	if (m == NULL || next == NULL)
+		return;
+
+	mlist_mark_all_deleted(m);
+	node = next->head;
+	while (node) {
+		mnode *following = node->next;
+
+		node->next = NULL;
+		if (mlist_find(m, node->path)) {
+			m->cur->status = MNT_NO_CHANGE;
+			free((void *)node->path);
+			free(node);
+		} else {
+			mlist_last(m);
+			if (m->head == NULL)
+				m->head = node;
+			else
+				m->cur->next = node;
+			m->cur = node;
+		}
+		node = following;
+	}
+	next->head = NULL;
+	next->cur = NULL;
+	m->cur = m->head;
 }
 
 const char *mlist_first(mlist *m)
@@ -138,4 +185,3 @@ void mlist_clear(mlist *m)
 	m->head = NULL;
 	m->cur = NULL;
 }
-

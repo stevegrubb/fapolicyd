@@ -327,30 +327,42 @@ static int mount_is_ignored(const char *point)
 /*
  * init_fs_list - create the filesystem type AVL tree.
  * @watch_fs: comma separated list of filesystem types to watch.
- * Returns nothing. Exits on failure when the list is missing.
+ * Returns 0 on success or 1 when the list cannot be fully initialized.
  */
-static void init_fs_list(const char *watch_fs)
+static int init_fs_list(const char *watch_fs)
 {
+	char *ptr, *saved, *tmp;
+
 	if (watch_fs == NULL) {
 		msg(LOG_ERR, "File systems to watch is empty");
-		exit(1);
+		return 1;
 	}
 	avl_init(&filesystems.index, cmp_fs);
 
 	// Now parse up list and push into avl
-	char *ptr, *saved, *tmp = strdup(watch_fs);
+	tmp = strdup(watch_fs);
 
 	if (tmp == NULL) {
 		msg(LOG_ERR, "Cannot duplicate watch_fs list");
-		return;
+		return 1;
 	}
 
 	ptr = strtok_r(tmp, ",", &saved);
 	while (ptr) {
-		new_filesystem(&filesystems, ptr);
+		if (!new_filesystem(&filesystems, ptr)) {
+			msg(LOG_ERR, "Cannot store watch_fs entry %s", ptr);
+			free(tmp);
+			destroy_fs_list(&filesystems);
+			return 1;
+		}
 		ptr = strtok_r(NULL, ",", &saved);
 	}
 	free(tmp);
+	if (filesystems.index.root == NULL) {
+		msg(LOG_ERR, "File systems to watch is empty");
+		return 1;
+	}
+	return 0;
 }
 
 static void term_handler(int sig __attribute__((unused)))
@@ -740,40 +752,34 @@ static int parse_mount_entry(char *buf, char **point, char **type)
 }
 
 /*
- * handle_mounts - read mount entries and refresh the watched mount list.
+ * read_mount_list - read a complete replacement list of watched mounts.
  * @fd: file descriptor for the mounts file.
+ * @next: empty list that receives matching mount paths.
  *
- * This function serializes access to the global mount list and the
- * subsequent fanotify mark update by holding mlist_lock across the
- * read/parse/update cycle. Callers may invoke it from the main loop or
- * the detached mount thread, but they must pass a descriptor that can be
- * rewound and read while the lock is held.
+ * The active list is left untouched until this read and every required
+ * allocation succeeds. This avoids applying a partial /proc/mounts snapshot.
  *
- * Returns no value.
+ * Returns 0 on success or -1 on a read or allocation failure.
  */
-static void handle_mounts(int fd)
+static int read_mount_list(int fd, mlist *next)
 {
 	char buf[PATH_MAX * 2];
 	char *point, *type;
+	fd_fgets_state_t *st;
+	int rc;
 
-	pthread_mutex_lock(&mlist_lock);
-
-	if (m == NULL) {
-		m = malloc(sizeof(mlist));
-		mlist_create(m);
+	if (lseek(fd, 0, SEEK_SET) == (off_t)-1) {
+		msg(LOG_ERR, "Cannot rewind mounts file (%s)", strerror(errno));
+		return -1;
 	}
-
-	// Rewind the descriptor
-	lseek(fd, 0, SEEK_SET);
-	fd_fgets_state_t *st = fd_fgets_init();
+	st = fd_fgets_init();
 	if (!st) {
-		pthread_mutex_unlock(&mlist_lock);
-		return;
+		msg(LOG_ERR, "Cannot allocate mounts reader (%s)", strerror(errno));
+		return -1;
 	}
 
-	mlist_mark_all_deleted(m);
-	do {
-		int rc = fd_fgets_r(st, buf, sizeof(buf), fd);
+	for (;;) {
+		rc = fd_fgets_r(st, buf, sizeof(buf), fd);
 		// Get a line
 		if (rc > 0) {
 			// We only need the mount point and filesystem type.
@@ -786,21 +792,74 @@ static void handle_mounts(int fd)
 			unescape_shell(point, strlen(point));
 			// Is this one that we care about?
 			if (check_mount_entry(point, type)) {
-				// Can we find it in the old list?
-				if (mlist_find(m, point)) {
-					// Mark no change
-					m->cur->status = MNT_NO_CHANGE;
-				} else
-					mlist_append(m, point);
+				if (mlist_append(next, point)) {
+					msg(LOG_ERR,
+					    "Cannot store mount point %s", point);
+					goto err_out;
+				}
 			}
-		} else if (rc < 0) // Some kind of error - stop
+		} else if (rc < 0) {
+			msg(LOG_ERR, "Cannot read mounts file (%s)",
+			    strerror(errno));
+			goto err_out;
+		} else if (!fd_fgets_eof_r(st)) {
+			msg(LOG_ERR, "Mounts file read made no progress");
+			goto err_out;
+		}
+		if (fd_fgets_eof_r(st))
 			break;
-	} while (!fd_fgets_eof_r(st));
+	}
 
 	fd_fgets_destroy(st);
+	return 0;
+
+err_out:
+	fd_fgets_destroy(st);
+	return -1;
+}
+
+/*
+ * handle_mounts - read mount entries and refresh the watched mount list.
+ * @fd: file descriptor for the mounts file.
+ *
+ * This function serializes access to the global mount list and the
+ * subsequent fanotify mark update by holding mlist_lock across the
+ * read/parse/update cycle. Callers may invoke it from the main loop or
+ * the detached mount thread, but they must pass a descriptor that can be
+ * rewound and read while the lock is held.
+ *
+ * Returns 0 on success or -1 when the snapshot cannot be applied safely.
+ */
+static int handle_mounts(int fd)
+{
+	mlist next;
+	int rc = -1;
+
+	mlist_create(&next);
+	pthread_mutex_lock(&mlist_lock);
+	if (read_mount_list(fd, &next))
+		goto out;
+
+	if (m == NULL) {
+		m = malloc(sizeof(*m));
+		if (m == NULL) {
+			msg(LOG_ERR, "Cannot allocate mount list (%s)",
+			    strerror(errno));
+			goto out;
+		}
+		*m = next;
+		mlist_create(&next);
+	} else
+		mlist_reconcile(m, &next);
+
 	// update marks
 	fanotify_update(m);
+	rc = 0;
+
+out:
+	mlist_clear(&next);
 	pthread_mutex_unlock(&mlist_lock);
+	return rc;
 }
 
 /*
@@ -830,7 +889,8 @@ static void *handle_mounts_thread_main(void *arg)
 	fd = *((int *)arg);
 	free(arg);
 
-	handle_mounts(fd);
+	if (handle_mounts(fd))
+		msg(LOG_ERR, "Mount list update failed; retaining current marks");
 	atomic_store(&mounts_running, false);
 
 	return NULL;
@@ -1317,7 +1377,14 @@ int main(int argc, const char *argv[])
 
 	// Setup filesystem to watch list
 	init_ignore_mounts(config.ignore_mounts);
-	init_fs_list(config.watch_fs);
+	if (init_fs_list(config.watch_fs)) {
+		destroy_rules();
+		destroy_fs_list(&filesystems);
+		destroy_fs_list(&ignored_mounts);
+		decision_config_destroy();
+		free_daemon_config(&config);
+		exit(1);
+	}
 
 	// Write the pid file for the init system
 	write_pid_file();
@@ -1408,7 +1475,19 @@ int main(int argc, const char *argv[])
 		exit(1);
 	}
 	pfd[0].events = POLLPRI;
-	handle_mounts(pfd[0].fd);
+	if (handle_mounts(pfd[0].fd)) {
+		msg(LOG_ERR, "Cannot initialize watched mount list");
+		close(pfd[0].fd);
+		file_close();
+		close_database();
+		destroy_event_system();
+		destroy_rules();
+		destroy_fs_list(&filesystems);
+		destroy_fs_list(&ignored_mounts);
+		free_daemon_config(&config);
+		unlink(pidfile);
+		exit(1);
+	}
 	pfd[1].fd = init_fanotify(&config, m);
 	pfd[1].events = POLLIN;
 #ifdef FAPOLICYD_ENABLE_FANOTIFY_FS_ERROR

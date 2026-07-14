@@ -44,6 +44,7 @@ const char *mlist_next(mlist *m);
 void mlist_mark_all_deleted(mlist *l);
 int mlist_find(mlist *m, const char *p);
 int mlist_append(mlist *m, const char *p);
+void mlist_reconcile(mlist *m, mlist *next);
 void mlist_clear(mlist *m);
 
 #endif

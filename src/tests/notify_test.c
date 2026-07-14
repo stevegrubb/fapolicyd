@@ -280,6 +280,43 @@ static void test_nonblocking_fanotify_reads(void)
 }
 
 /*
+ * test_mount_list_reconcile - verify a complete mount snapshot is merged.
+ *
+ * The active list must retain existing marks, flag disappeared mounts for
+ * removal, and transfer newly parsed paths without allocating during the
+ * update. Returns nothing. Exits on test failure.
+ */
+static void test_mount_list_reconcile(void)
+{
+	mlist current, next;
+
+	mlist_create(&current);
+	mlist_create(&next);
+	CHECK(mlist_append(&current, "/old") == 0, 185,
+	      "[ERROR:185] failed adding old mount fixture");
+	CHECK(mlist_append(&current, "/kept") == 0, 186,
+	      "[ERROR:186] failed adding kept mount fixture");
+	CHECK(mlist_append(&next, "/kept") == 0, 187,
+	      "[ERROR:187] failed adding replacement kept fixture");
+	CHECK(mlist_append(&next, "/new") == 0, 188,
+	      "[ERROR:188] failed adding replacement new fixture");
+
+	mlist_reconcile(&current, &next);
+	CHECK(mlist_find(&current, "/old") && current.cur->status == MNT_DELETE,
+	      189, "[ERROR:189] disappeared mount was not marked deleted");
+	CHECK(mlist_find(&current, "/kept") &&
+	      current.cur->status == MNT_NO_CHANGE, 190,
+	      "[ERROR:190] retained mount was not preserved");
+	CHECK(mlist_find(&current, "/new") && current.cur->status == MNT_ADD,
+	      191, "[ERROR:191] new mount was not marked for addition");
+	CHECK(mlist_first(&next) == NULL, 192,
+	      "[ERROR:192] replacement list retained transferred nodes");
+
+	mlist_clear(&current);
+	mlist_clear(&next);
+}
+
+/*
  * test_systemd_notify_runtime_gate - verify debug-mode notify suppression.
  *
  * Debug runs can inherit arbitrary NOTIFY_SOCKET/WATCHDOG_* values from a
@@ -1101,6 +1138,7 @@ int main(void)
 	test_interval_report_deadline();
 	test_interval_report_disable_closes_timer();
 	test_nonblocking_fanotify_reads();
+	test_mount_list_reconcile();
 
 	before = getKernelQueueOverflow();
 	metadata.mask = 0;
