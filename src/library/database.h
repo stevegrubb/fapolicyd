@@ -36,6 +36,8 @@
 typedef struct {
 	MDB_val path;
 	MDB_val data;
+	/* Long paths are represented by a non-reversible SHA-512 key. */
+	int path_is_hashed;
 } walkdb_entry_t;
 
 #define TRUST_DB_METADATA_NAME "trust.meta"
@@ -88,6 +90,12 @@ enum walk_database_status {
 	WALK_DATABASE_SUCCESS = 0,
 	WALK_DATABASE_ERROR = 1,
 	WALK_DATABASE_EMPTY = 2,
+};
+
+enum walk_database_next_status {
+	WALK_DATABASE_DONE = 0,
+	WALK_DATABASE_NEXT = 1,
+	WALK_DATABASE_NEXT_ERROR = -1,
 };
 
 int walk_database_start(conf_t *config) __nonnull ((1));

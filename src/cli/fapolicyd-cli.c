@@ -860,7 +860,8 @@ static int verify_file(const char *path, off_t size, const char *sha,
 
 static int check_trustdb(void)
 {
-	int found = 0;
+	int verification_failed = 0, exit_rc = CLI_EXIT_SUCCESS;
+	unsigned long unverifiable = 0;
 
 	set_message_mode(MSG_STDERR, DBG_NO);
 	reset_config();
@@ -887,30 +888,58 @@ static int check_trustdb(void)
 		trustdb_size_t stored_size;
 		off_t size;
 		char sha[FILE_DIGEST_STRING_MAX];
-		char path[448];
 		char data[TRUSTDB_DATA_BUFSZ];
+		char *path;
 
 		// Get the entry and format it for use.
 		walkdb_entry_t *entry = walk_database_get_entry();
-		snprintf(path, sizeof(path), "%.*s", (int) entry->path.mv_size,
-			(char *) entry->path.mv_data);
+		if (entry->path_is_hashed) {
+			/* A SHA-512 key is not evidence that its record miscompares. */
+			unverifiable++;
+			continue;
+		}
+
+		path = malloc(entry->path.mv_size + 1);
+		if (path == NULL) {
+			fprintf(stderr, "Out of memory while verifying trust database\n");
+			exit_rc = CLI_EXIT_INTERNAL;
+			break;
+		}
+		memcpy(path, entry->path.mv_data, entry->path.mv_size);
+		path[entry->path.mv_size] = '\0';
 		snprintf(data, sizeof(data), "%.*s", (int) entry->data.mv_size,
 			(char *) entry->data.mv_data);
 		if (sscanf(data, DATA_FORMAT_IN, &tsource, &stored_size, sha) != 3 ||
 		    trustdb_size_to_off_t(stored_size, &size)) {
 			fprintf(stderr, "%s data entry is corrupted\n", path);
+			verification_failed = 1;
+			free(path);
 			continue;
 		}
 		if (verify_file(path, size, sha, tsource))
-			found = 1;
-	} while (walk_database_next());
+			verification_failed = 1;
+		free(path);
+	} while ((rc = walk_database_next()) == WALK_DATABASE_NEXT);
 
 	walk_database_finish();
 
-	if (found == 0)
+	if (rc == WALK_DATABASE_NEXT_ERROR)
+		exit_rc = CLI_EXIT_DB_ERROR;
+	if (unverifiable) {
+		fprintf(stderr,
+			"Warning: %lu hashed trust database %s could not be "
+			"verified: the original %s %s unavailable\n",
+			unverifiable, unverifiable == 1 ? "entry" : "entries",
+			unverifiable == 1 ? "path" : "paths",
+			unverifiable == 1 ? "is" : "are");
+	}
+	if (verification_failed && exit_rc == CLI_EXIT_SUCCESS)
+		exit_rc = CLI_EXIT_GENERIC;
+	if (!verification_failed && unverifiable == 0 &&
+	    exit_rc == CLI_EXIT_SUCCESS)
 		puts("No problems found");
 
-	return CLI_EXIT_SUCCESS;
+	return exit_rc;
 }
 
 static int is_link(const char *path)

@@ -5745,6 +5745,24 @@ static MDB_txn *walk_txn;
 static MDB_cursor *walk_cursor;
 
 /*
+ * walk_database_set_entry_type - classify the current walker key.
+ *
+ * Long paths are written as a SHA-512 hex string including its terminating
+ * NUL. Direct path keys never include a NUL, so the stored size and trailing
+ * byte let the CLI avoid treating a digest as a filesystem pathname.
+ *
+ * Returns nothing.
+ */
+static void walk_database_set_entry_type(void)
+{
+	const char *path = wdb_entry.path.mv_data;
+
+	wdb_entry.path_is_hashed = wdb_entry.path.mv_size ==
+		(SHA512_LEN * 2) + 1 && path &&
+		path[wdb_entry.path.mv_size - 1] == '\0';
+}
+
+/*
  * walk_database_reset - close private read-only CLI walk state.
  * @void: no arguments are required.
  *
@@ -5765,6 +5783,7 @@ static void walk_database_reset(void)
 	walk_cursor = NULL;
 	walk_txn = NULL;
 	walk_env = NULL;
+	memset(&wdb_entry, 0, sizeof(wdb_entry));
 }
 
 /*
@@ -5834,6 +5853,7 @@ int walk_database_start(conf_t *config)
 	rc = mdb_cursor_get(walk_cursor, &wdb_entry.path, &wdb_entry.data,
 			    MDB_FIRST);
 	if (rc == 0) {
+		walk_database_set_entry_type();
 		/* Keep handles open so walk_database_next() can continue. */
 		return WALK_DATABASE_SUCCESS;
 	}
@@ -5869,7 +5889,8 @@ walkdb_entry_t *walk_database_get_entry(void)
  * walk_database_next - advance the CLI verification cursor.
  * @void: no arguments are required.
  *
- * Returns 1 when another entry is available and 0 at end of walk or on error.
+ * Returns WALK_DATABASE_NEXT for another entry, WALK_DATABASE_DONE at the
+ * end of the walk, or WALK_DATABASE_NEXT_ERROR on an LMDB cursor error.
  */
 int walk_database_next(void)
 {
@@ -5877,13 +5898,17 @@ int walk_database_next(void)
 
 	rc = mdb_cursor_get(walk_cursor, &wdb_entry.path, &wdb_entry.data,
 			    MDB_NEXT);
-	if (rc == 0)
-		return 1;
+	if (rc == 0) {
+		walk_database_set_entry_type();
+		return WALK_DATABASE_NEXT;
+	}
 
-	if (rc != MDB_NOTFOUND)
+	if (rc != MDB_NOTFOUND) {
 		puts(mdb_strerror(rc));
+		return WALK_DATABASE_NEXT_ERROR;
+	}
 
-	return 0;
+	return WALK_DATABASE_DONE;
 }
 
 /*

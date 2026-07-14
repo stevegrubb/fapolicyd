@@ -627,6 +627,7 @@ static int test_lmdb_short_path_round_trip(void)
 	const char *digest =
 		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 	char payload[256];
+	walkdb_entry_t *entry;
 
 	rc = with_temp_db(dir, sizeof(dir), &cfg);
 	CHECK(rc == 0, 20, "[ERROR:20] failed to open temporary LMDB");
@@ -641,6 +642,16 @@ static int test_lmdb_short_path_round_trip(void)
 	      "[ERROR:22] short-path lookup failed");
 
 	database_close_for_tests();
+	CHECK(walk_database_start(&cfg) == WALK_DATABASE_SUCCESS, 24,
+	      "[ERROR:24] short-path walker failed");
+	entry = walk_database_get_entry();
+	CHECK(entry != NULL && entry->path_is_hashed == 0, 25,
+	      "[ERROR:25] direct path was classified as hashed");
+	CHECK(entry->path.mv_size == strlen(path), 26,
+	      "[ERROR:26] direct path key length changed");
+	CHECK(memcmp(entry->path.mv_data, path, entry->path.mv_size) == 0, 27,
+	      "[ERROR:27] direct path key changed");
+	walk_database_finish();
 	database_set_location(NULL, NULL);
 	CHECK(remove_lmdb_files(dir) == 0, 23,
 	      "[ERROR:23] short-path cleanup failed");
@@ -685,7 +696,7 @@ static int test_lmdb_long_path_shared_prefix_no_collision(void)
 	conf_t cfg;
 	char dir[128];
 	long entries = 0;
-	int rc;
+	int rc, walk_rc;
 	int count = 1;
 	char *path_a = build_long_path("shared-suffix-a");
 	char *path_b = build_long_path("shared-suffix-b");
@@ -728,9 +739,16 @@ static int test_lmdb_long_path_shared_prefix_no_collision(void)
 	CHECK(database_walk_reader_slots_for_tests() > 0, 49,
 	      "[ERROR:49] walker did not register an LMDB reader");
 	entry = walk_database_get_entry();
-	CHECK(entry != NULL, 46, "[ERROR:46] walk_database_get_entry failed");
-	while (walk_database_next())
+	CHECK(entry != NULL && entry->path_is_hashed, 46,
+	      "[ERROR:46] long path key was not classified as hashed");
+	while ((walk_rc = walk_database_next()) == WALK_DATABASE_NEXT) {
+		entry = walk_database_get_entry();
+		CHECK(entry->path_is_hashed, 50,
+		      "[ERROR:50] long path key was not classified as hashed");
 		count++;
+	}
+	CHECK(walk_rc == WALK_DATABASE_DONE, 51,
+	      "[ERROR:51] walker ended with an LMDB error");
 	walk_database_finish();
 	CHECK(count == 2, 47, "[ERROR:47] walker did not see two entries");
 
