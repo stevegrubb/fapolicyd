@@ -532,6 +532,54 @@ static void test_shutdown_queued_events(void)
 }
 
 /*
+ * test_shutdown_rejects_late_enqueue - keep queue ownership safe at shutdown.
+ *
+ * Once shutdown begins, an event that was not already handed to a worker must
+ * remain owned by the dispatcher. Events accepted before that boundary still
+ * need the normal queue-drain reply. Returns nothing. Exits on test failure.
+ */
+static void test_shutdown_rejects_late_enqueue(void)
+{
+	int accepted[2], rejected[2];
+
+	CHECK(test_notify_queue_reset(2) == 0, 174,
+	      "[ERROR:174] queue reset failed for shutdown admission test");
+	CHECK(pipe(accepted) == 0, 175,
+	      "[ERROR:175] accepted pipe setup failed");
+	CHECK(test_notify_enqueue_pid_fd(700, accepted[0]) == 0, 176,
+	      "[ERROR:176] pre-shutdown event was not queued");
+
+	test_notify_worker_pool_begin_shutdown();
+	CHECK(pipe(rejected) == 0, 177,
+	      "[ERROR:177] rejected pipe setup failed");
+	errno = 0;
+	CHECK(test_notify_enqueue_pid_fd(701, rejected[0]) == -1 &&
+	      errno == ESHUTDOWN, 178,
+	      "[ERROR:178] shutdown accepted a late event");
+	CHECK(test_notify_worker_queue_depth(0) == 1, 179,
+	      "[ERROR:179] shutdown changed accepted queue ownership");
+
+	__atomic_store_n(&config.permissive, true, __ATOMIC_RELAXED);
+	CHECK(decision_config_publish(&config) == 0, 180,
+	      "[ERROR:180] decision config publish failed");
+	CHECK(test_notify_shutdown_queued_events() == 1, 181,
+	      "[ERROR:181] accepted event was not drained at shutdown");
+	__atomic_store_n(&config.permissive, false, __ATOMIC_RELAXED);
+	CHECK(decision_config_publish(&config) == 0, 182,
+	      "[ERROR:182] decision config reset failed");
+	decision_config_destroy();
+
+	errno = 0;
+	CHECK(close(accepted[0]) == -1 && errno == EBADF, 183,
+	      "[ERROR:183] accepted event fd was not closed");
+	CHECK(close(rejected[0]) == 0, 184,
+	      "[ERROR:184] rejected event fd changed ownership");
+	close(accepted[1]);
+	close(rejected[1]);
+	test_notify_queue_destroy();
+}
+
+/*
  * test_dispatcher_worker_routing - verify stable subject worker selection.
  *
  * The dispatcher must not choose workers by queue pressure or round-robin:
@@ -1313,6 +1361,7 @@ int main(void)
 
 	test_shutdown_deferred_events();
 	test_shutdown_queued_events();
+	test_shutdown_rejects_late_enqueue();
 	test_systemd_notify_runtime_gate();
 
 	return 0;

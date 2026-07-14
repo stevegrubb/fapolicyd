@@ -356,7 +356,11 @@ static void init_fs_list(const char *watch_fs)
 static void term_handler(int sig __attribute__((unused)))
 {
 	stop = true;
-	nudge_queue();
+	/*
+	 * Let the dispatcher finish its current nonblocking batch before workers
+	 * are woken for shutdown. Otherwise a worker can drain and exit while a
+	 * signal-interrupted handle_events() resumes and enqueues a later record.
+	 */
 }
 
 

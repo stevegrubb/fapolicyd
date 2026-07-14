@@ -86,6 +86,8 @@ static struct queue_metrics last_queue_metrics[DECISION_WORKER_MAX];
 static unsigned int last_queue_metrics_count;
 static struct decision_worker decision_workers[DECISION_WORKER_MAX];
 static unsigned int active_decision_workers;
+static atomic_bool decision_worker_pool_stopping = ATOMIC_VAR_INIT(true);
+static pthread_mutex_t decision_worker_pool_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned int timing_saved_queue_depth[DECISION_WORKER_MAX];
 static int rpt_timer_fd = -1;
 static unsigned int rpt_interval;
@@ -111,6 +113,7 @@ static unsigned int timing_queue_depth_restore(void *ctx, unsigned int saved);
 static struct decision_worker *dispatcher_worker_for_metadata(
 		const struct fanotify_event_metadata *metadata,
 		unsigned int *worker_index);
+static void decision_worker_pool_begin_shutdown(void);
 
 /*
  * decision_worker_pool_active_count - return workers currently receiving
@@ -216,17 +219,54 @@ int decision_worker_pool_enqueue(
 	struct decision_worker *worker;
 	decision_event_t event;
 	unsigned int index;
+	int rc;
 
+	if (worker_index)
+		*worker_index = DECISION_EVENT_NO_WORKER;
+	/*
+	 * Shutdown holds this lock while it closes admission. That makes the
+	 * successful q_enqueue() handoff complete before workers can drain and
+	 * close their queues, so the dispatcher never loses a permission fd.
+	 */
+	pthread_mutex_lock(&decision_worker_pool_lock);
+	if (atomic_load_explicit(&decision_worker_pool_stopping,
+				 memory_order_acquire)) {
+		errno = ESHUTDOWN;
+		rc = -1;
+		goto out;
+	}
 	worker = dispatcher_worker_for_metadata(metadata, &index);
 	if (worker_index)
 		*worker_index = index;
-	if (worker == NULL)
-		return -1;
+	if (worker == NULL) {
+		rc = -1;
+		goto out;
+	}
 
 	decision_event_init(&event, metadata);
 	event.worker_index = index;
 
-	return q_enqueue(worker->queue, &event);
+	rc = q_enqueue(worker->queue, &event);
+out:
+	pthread_mutex_unlock(&decision_worker_pool_lock);
+	return rc;
+}
+
+/*
+ * decision_worker_pool_begin_shutdown - stop accepting dispatcher handoffs.
+ *
+ * The caller must do this before waking queues for shutdown. The mutex waits
+ * for any in-flight q_enqueue() to publish its event before a worker drains
+ * the queue and exits.
+ *
+ * Returns nothing.
+ */
+static void decision_worker_pool_begin_shutdown(void)
+{
+	pthread_mutex_lock(&decision_worker_pool_lock);
+	atomic_store_explicit(&decision_worker_pool_stopping, true,
+			      memory_order_release);
+	pthread_mutex_unlock(&decision_worker_pool_lock);
 }
 
 /*
@@ -348,6 +388,8 @@ static void cleanup_worker_setup(unsigned int worker_count)
 		}
 	}
 	active_decision_workers = 0;
+	atomic_store_explicit(&decision_worker_pool_stopping, true,
+			      memory_order_release);
 	decision_timing_set_active_workers(0);
 	decision_timing_set_queue_depth_hooks(NULL, NULL, NULL);
 }
@@ -362,6 +404,8 @@ int decision_worker_pool_open(const conf_t *conf)
 {
 	unsigned int i;
 
+	atomic_store_explicit(&decision_worker_pool_stopping, true,
+			      memory_order_release);
 	active_decision_workers = 0;
 	decision_timing_set_active_workers(0);
 	if (conf->decision_threads == 0 ||
@@ -380,6 +424,8 @@ int decision_worker_pool_open(const conf_t *conf)
 		}
 	}
 	active_decision_workers = conf->decision_threads;
+	atomic_store_explicit(&decision_worker_pool_stopping, false,
+			      memory_order_release);
 	decision_timing_set_active_workers(active_decision_workers);
 	save_last_queue_metrics();
 	decision_timing_set_queue_depth_hooks(timing_queue_depth_reset,
@@ -460,6 +506,7 @@ int decision_worker_pool_start(const struct decision_worker_runtime *runtime)
 			    "Failed to create decision worker %u (%s)",
 			    worker->id, strerror(rc));
 			atomic_store(&stop, true);
+			decision_worker_pool_begin_shutdown();
 			for (i = 0; i < started_workers; i++)
 				q_shutdown(decision_workers[i].queue);
 			for (i = 0; i < started_workers; i++)
@@ -479,6 +526,7 @@ int decision_worker_pool_start(const struct decision_worker_runtime *runtime)
 		msg(LOG_ERR, "Failed to create health monitor thread (%s)",
 		    strerror(rc));
 		atomic_store(&stop, true);
+		decision_worker_pool_begin_shutdown();
 		for (i = 0; i < active_decision_workers; i++)
 			q_shutdown(decision_workers[i].queue);
 		for (i = 0; i < active_decision_workers; i++)
@@ -538,6 +586,7 @@ void decision_worker_pool_shutdown(void)
 {
 	unsigned int i;
 
+	decision_worker_pool_begin_shutdown();
 	for (i = 0; i < active_decision_workers; i++)
 		q_shutdown(decision_workers[i].queue);
 	for (i = 0; i < active_decision_workers; i++)
@@ -588,6 +637,7 @@ void decision_worker_pool_close(void)
  */
 void decision_worker_pool_discard(void)
 {
+	decision_worker_pool_begin_shutdown();
 	if (rpt_timer_fd != -1) {
 		close(rpt_timer_fd);
 		rpt_timer_fd = -1;
@@ -599,7 +649,11 @@ void decision_worker_pool_discard(void)
 }
 
 /*
- * decision_worker_pool_nudge - wake all worker queues.
+ * decision_worker_pool_nudge - wake all worker queues without stopping them.
+ *
+ * Report and signal paths use this to interrupt timed queue waits. The actual
+ * shutdown state is changed only by decision_worker_pool_shutdown(), after the
+ * dispatcher has finished handing off its current fanotify batch.
  * Returns nothing.
  */
 void decision_worker_pool_nudge(void)
@@ -1165,8 +1219,8 @@ static int shutdown_fallback_decision(void)
  * shutdown_queued_events - reply to every event left in a worker queue.
  * @worker: decision worker whose queue is being drained.
  *
- * A decision worker exits its main loop as soon as stop is observed. Any
- * permission event that reached the worker queue but was not processed yet
+ * A decision worker exits its main loop only after worker-pool shutdown starts.
+ * Any permission event that reached the worker queue but was not processed yet
  * still owns a live fd and can leave the requesting task blocked. During
  * shutdown, answer those queued events with the same permissive fallback
  * policy used for other bounded failure paths.
@@ -1240,6 +1294,9 @@ int test_notify_queue_reset(unsigned int entries)
 	worker_health_init(&worker->health);
 	worker->queue = q_open(entries);
 	active_decision_workers = worker->queue ? 1 : 0;
+	atomic_store_explicit(&decision_worker_pool_stopping,
+			      worker->queue == NULL,
+			      memory_order_release);
 	return worker->queue == NULL ? -1 : 0;
 }
 
@@ -1257,6 +1314,8 @@ void test_notify_queue_destroy(void)
 	worker->queue = NULL;
 	worker->context = NULL;
 	active_decision_workers = 0;
+	atomic_store_explicit(&decision_worker_pool_stopping, true,
+			      memory_order_release);
 }
 
 /*
@@ -1454,6 +1513,8 @@ int test_notify_worker_pool_reset(unsigned int workers, unsigned int entries)
 		}
 	}
 	active_decision_workers = workers;
+	atomic_store_explicit(&decision_worker_pool_stopping, false,
+			      memory_order_release);
 	decision_timing_set_active_workers(workers);
 	return 0;
 }
@@ -1474,7 +1535,19 @@ void test_notify_worker_pool_destroy(void)
 		decision_workers[i].context = NULL;
 	}
 	active_decision_workers = 0;
+	atomic_store_explicit(&decision_worker_pool_stopping, true,
+			      memory_order_release);
 	decision_timing_set_active_workers(0);
+}
+
+/*
+ * test_notify_worker_pool_begin_shutdown - close synthetic queue admission.
+ *
+ * Returns nothing.
+ */
+void test_notify_worker_pool_begin_shutdown(void)
+{
+	decision_worker_pool_begin_shutdown();
 }
 
 /*
@@ -1649,7 +1722,8 @@ static void *decision_worker_main(void *arg)
 	if (owns_reports)
 		atomic_store_explicit(&run_stats, true, memory_order_relaxed);
 
-	while (!stop) {
+	while (!atomic_load_explicit(&decision_worker_pool_stopping,
+				     memory_order_acquire)) {
 		int rc;
 		decision_event_t event;
 

@@ -61,6 +61,7 @@ unsigned int test_notify_shutdown_deferred_events(void);
 unsigned int test_notify_worker_index(pid_t pid, unsigned int workers);
 int test_notify_worker_pool_reset(unsigned int workers, unsigned int entries);
 void test_notify_worker_pool_destroy(void);
+void test_notify_worker_pool_begin_shutdown(void);
 int test_notify_enqueue_pid_fd(pid_t pid, int event_fd);
 unsigned int test_notify_worker_queue_depth(unsigned int worker_id);
 unsigned int test_notify_worker_drain(unsigned int worker_id, pid_t *pids,

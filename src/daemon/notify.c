@@ -554,10 +554,12 @@ void handle_events(void)
 					if (decision_worker_pool_enqueue(
 							metadata,
 							&worker_index)) {
+						int enqueue_errno = errno;
 						int decision = FAN_DENY;
 
-						failure_action_record(
-						    FAILURE_REASON_QUEUE_FULL);
+						if (enqueue_errno != ESHUTDOWN)
+							failure_action_record(
+							    FAILURE_REASON_QUEUE_FULL);
 						if (decision_config_permissive(NULL))
 							decision = FAN_ALLOW;
 						/*
@@ -569,13 +571,20 @@ void handle_events(void)
 						 */
 						reply_event(fd, metadata,
 							    decision, NULL);
-						msg(LOG_ERR,
-						    "Failed to enqueue event "
-						    "for PID %d to worker %u: "
-						    "queue is full, please "
-						    "consider tuning q_size if "
-						    "issue happens often",
-						    metadata->pid, worker_index);
+						if (enqueue_errno == ESHUTDOWN)
+							msg(LOG_DEBUG,
+							    "Worker pool stopped before "
+							    "event for PID %d could be "
+							    "queued; answered directly",
+							    metadata->pid);
+						else
+							msg(LOG_ERR,
+							    "Failed to enqueue event "
+							    "for PID %d to worker %u: "
+							    "queue is full, please "
+							    "consider tuning q_size if "
+							    "issue happens often",
+							    metadata->pid, worker_index);
 					}
 				}
 			} else {
