@@ -35,6 +35,7 @@
 #include <sys/resource.h>
 #include <ctype.h>
 #include <cap-ng.h>
+#include <sys/file.h>
 #include <sys/stat.h>	   /* umask */
 #include <seccomp.h>
 #include <stdbool.h>
@@ -101,6 +102,9 @@ static struct fs_avl ignored_mounts;
 // List of mounts being watched
 static mlist *m = NULL;
 static pthread_mutex_t mlist_lock = PTHREAD_MUTEX_INITIALIZER;
+static int pid_file_fd = -1;
+static bool pid_file_created;
+static bool pid_file_written;
 
 // Reconfiguration
 static atomic_bool reconfig_running = false;
@@ -613,30 +617,77 @@ int rpmsqEnable (int signum, void *handler)
 #endif
 
 
+/*
+ * remove_pid_file - remove the pid file and release this daemon's lock.
+ *
+ * The advisory lock must remain held until shutdown has completed so a new
+ * daemon cannot create a second pid file while this process still runs.
+ *
+ * Returns nothing.
+ */
+static void remove_pid_file(void)
+{
+	if (pid_file_fd == -1)
+		return;
+
+	if ((pid_file_created || pid_file_written) &&
+	    unlink(pidfile) && errno != ENOENT)
+		msg(LOG_WARNING, "Unable to remove pidfile (%s)",
+		    strerror(errno));
+	close(pid_file_fd);
+	pid_file_fd = -1;
+	pid_file_created = false;
+	pid_file_written = false;
+}
+
+/*
+ * write_pid_file - write this process ID to an already locked pid file.
+ *
+ * Returns 0 on success or 1 after releasing the lock on write failure.
+ */
 static int write_pid_file(void)
 {
-	int pidfd, len;
+	int len;
 	char val[16];
+	size_t written = 0;
 
 	len = snprintf(val, sizeof(val), "%u\n", getpid());
-	if (len <= 0) {
+	if (len <= 0 || (size_t)len >= sizeof(val)) {
 		msg(LOG_ERR, "Pid error (%s)", strerror(errno));
+		remove_pid_file();
 		return 1;
 	}
-	pidfd = open(pidfile, O_CREAT | O_TRUNC | O_NOFOLLOW | O_WRONLY, 0644);
-	if (pidfd < 0) {
-		msg(LOG_ERR, "Unable to create pidfile (%s)",
-			strerror(errno));
+	if (pid_file_fd == -1) {
+		msg(LOG_ERR, "Pidfile lock was not acquired");
 		return 1;
 	}
-	if (write(pidfd, val, (unsigned int)len) != len) {
+	if (lseek(pid_file_fd, 0, SEEK_SET) == (off_t)-1 ||
+	    ftruncate(pid_file_fd, 0)) {
 		msg(LOG_ERR, "Unable to write pidfile (%s)",
 			strerror(errno));
-		close(pidfd);
-		return 1;
+		goto err_out;
 	}
-	close(pidfd);
+	while (written < (size_t)len) {
+		ssize_t rc = write(pid_file_fd, val + written,
+				   (size_t)len - written);
+
+		if (rc > 0) {
+			written += (size_t)rc;
+			continue;
+		}
+		if (rc < 0 && errno == EINTR)
+			continue;
+		if (rc == 0)
+			errno = EIO;
+		msg(LOG_ERR, "Unable to write pidfile (%s)", strerror(errno));
+		goto err_out;
+	}
+	pid_file_written = true;
 	return 0;
+
+err_out:
+	remove_pid_file();
+	return 1;
 }
 
 
@@ -1130,69 +1181,112 @@ void do_stat_report_reset(FILE *f, int shutdown, int reset)
 	do_metrics_report_reset(f, reset);
 }
 
+/*
+ * already_running - lock the pid file and reject a live daemon instance.
+ *
+ * The successful caller retains the advisory lock until final shutdown. That
+ * makes the stale-pid check and later write one lifecycle operation instead of
+ * a check-then-create race between concurrent starts.
+ *
+ * Returns 1 when another daemon may be running or the pid file is unsafe to
+ * inspect, otherwise returns 0 with pid_file_fd locked for write_pid_file().
+ */
 int already_running(void)
 {
-	fd_fgets_state_t *st = fd_fgets_init();
-	if (!st)
+	fd_fgets_state_t *st = NULL;
+	char pid_buf[16], exe_buf[80], my_path[80];
+	int created = 0;
+	int read_len;
+	int pid;
+	int result = 1;
+
+	if (pid_file_fd != -1)
 		return 1;
+	pid_file_created = false;
+	pid_file_written = false;
 
-	int pidfd = open(pidfile, O_RDONLY);
-	if (pidfd >= 0) {
-		char pid_buf[16];
-		int read_rc;
-
-		read_rc = fd_fgets_r(st, pid_buf, sizeof(pid_buf), pidfd);
-		if (read_rc > 0) {
-			int pid;
-			char exe_buf[80], my_path[80];
-
-			// Get our path
-			if (get_program_from_pid(getpid(),
-					sizeof(exe_buf), my_path) == NULL)
-				goto err_out; // shouldn't happen, but be safe
-
-			// convert pidfile to integer
-			errno = 0;
-			pid = strtoul(pid_buf, NULL, 10);
-			if (errno)
-				goto err_out; // shouldn't happen, but be safe
-
-			// verify it really is fapolicyd
-			if (get_program_from_pid(pid,
-					sizeof(exe_buf), exe_buf) == NULL)
-				goto good; //if pid doesn't exist, we're OK
-
-			// If the path doesn't have fapolicyd in it, we're OK
-			if (strstr(exe_buf, "fapolicyd") == NULL)
-				goto good;
-
-			if (strcmp(exe_buf, my_path) == 0)
-				goto err_out; // if the same, we need to exit
-
-			// one last sanity check in case path is unexpected
-			// for example: /sbin/fapolicyd & /home/test/fapolicyd
-			if (pid != getpid())
-				goto err_out;
-good:
-			fd_fgets_destroy(st);
-			close(pidfd);
-			unlink(pidfile);
-			return 0;
-		} else if (read_rc < 0)
-			msg(LOG_ERR, "fapolicyd pid file cannot be read: %s",
+	for (;;) {
+		pid_file_fd = open(pidfile, O_NOFOLLOW | O_RDWR | O_CLOEXEC);
+		if (pid_file_fd >= 0)
+			break;
+		if (errno != ENOENT) {
+			msg(LOG_ERR, "Unable to open pidfile (%s)",
 			    strerror(errno));
-		else
-			msg(LOG_ERR, "fapolicyd pid file found but unreadable");
-err_out: // At this point, we have a pid file, let's just assume it's alive
-	 // because if 2 are running, it deadlocks the machine
-
-		fd_fgets_destroy(st);
-		close(pidfd);
-		return 1;
+			return 1;
+		}
+		pid_file_fd = open(pidfile, O_CREAT | O_EXCL | O_NOFOLLOW |
+				   O_RDWR | O_CLOEXEC, 0644);
+		if (pid_file_fd >= 0) {
+			created = 1;
+			break;
+		}
+		if (errno != EEXIST) {
+			msg(LOG_ERR, "Unable to create pidfile (%s)",
+			    strerror(errno));
+			return 1;
+		}
 	}
 
-	fd_fgets_destroy(st);
-	return 0; // pid file doesn't exist, we're good to go
+	pid_file_created = created;
+	if (flock(pid_file_fd, LOCK_EX | LOCK_NB)) {
+		msg(LOG_ERR, "Unable to lock pidfile (%s)", strerror(errno));
+		goto out;
+	}
+	if (created) {
+		result = 0;
+		goto out;
+	}
+	if (lseek(pid_file_fd, 0, SEEK_SET) == (off_t)-1) {
+		msg(LOG_ERR, "Unable to read pidfile (%s)", strerror(errno));
+		goto out;
+	}
+
+	st = fd_fgets_init();
+	if (st == NULL) {
+		msg(LOG_ERR, "Unable to allocate pidfile reader (%s)",
+		    strerror(errno));
+		goto out;
+	}
+	read_len = fd_fgets_r(st, pid_buf, sizeof(pid_buf), pid_file_fd);
+	if (read_len < 0) {
+		msg(LOG_ERR, "fapolicyd pid file could not be read (%s)",
+		    strerror(errno));
+		goto out;
+	}
+	if (read_len == 0) {
+		/*
+		 * A crash can leave the file empty after creation or truncation.
+		 * Holding its exclusive lock proves no live fapolicyd owns it.
+		 */
+		msg(LOG_WARNING, "Replacing empty stale fapolicyd pid file");
+		result = 0;
+		goto out;
+	}
+
+	// Get our path
+	if (get_program_from_pid(getpid(), sizeof(exe_buf), my_path) == NULL)
+		goto out; // shouldn't happen, but be safe
+
+	// convert pidfile to integer
+	errno = 0;
+	pid = strtoul(pid_buf, NULL, 10);
+	if (errno)
+		goto out; // shouldn't happen, but be safe
+
+	// verify it really is fapolicyd
+	if (get_program_from_pid(pid, sizeof(exe_buf), exe_buf) == NULL)
+		result = 0; // pid doesn't exist, we're OK
+	else if (strstr(exe_buf, "fapolicyd") == NULL)
+		result = 0; // a different program owns the stale pid
+	else if (strcmp(exe_buf, my_path) != 0 && pid == getpid())
+		result = 0; // unexpected path but this process owns the pid
+
+out:
+	if (st)
+		fd_fgets_destroy(st);
+	if (result)
+		remove_pid_file();
+	return result;
 }
 
 int main(int argc, const char *argv[])
@@ -1287,8 +1381,15 @@ int main(int argc, const char *argv[])
 		msg(LOG_ERR, "fapolicyd is already running");
 		exit(1);
 	}
+	/* Register first so LIFO cleanup releases the lock after later teardown. */
+	if (atexit(remove_pid_file)) {
+		remove_pid_file();
+		msg(LOG_ERR, "Cannot set pidfile exit function");
+		exit(1);
+	}
 
 	if (decision_config_publish(&config)) {
+		remove_pid_file();
 		free_daemon_config(&config);
 		msg(LOG_ERR, "Exiting due to bad decision configuration");
 		return 1;
@@ -1344,11 +1445,14 @@ int main(int argc, const char *argv[])
 				strerror(errno));
 
 	// Load the rule configuration
-	if (load_rules(&config))
+	if (load_rules(&config)) {
+		remove_pid_file();
 		exit(1);
+	}
 	if (!debug_mode) {
 		if (!foreground_mode) {
 			if (become_daemon() < 0) {
+				remove_pid_file();
 				msg(LOG_ERR,
 				    "Exiting due to failure daemonizing");
 				exit(1);
@@ -1362,6 +1466,7 @@ int main(int argc, const char *argv[])
 	 * message_async_stop() is a safe no-op until the logger starts below.
 	 */
 	if (atexit(message_async_stop)) {
+		remove_pid_file();
 		msg(LOG_ERR, "cannot register async log exit handler");
 		exit(1);
 	}
@@ -1371,6 +1476,7 @@ int main(int argc, const char *argv[])
 
 	// Set the exit function so there is always a fifo cleanup
 	if (atexit(unlink_fifo)) {
+		remove_pid_file();
 		msg(LOG_ERR, "Cannot set exit function");
 		exit(1);
 	}
@@ -1378,6 +1484,7 @@ int main(int argc, const char *argv[])
 	// Setup filesystem to watch list
 	init_ignore_mounts(config.ignore_mounts);
 	if (init_fs_list(config.watch_fs)) {
+		remove_pid_file();
 		destroy_rules();
 		destroy_fs_list(&filesystems);
 		destroy_fs_list(&ignored_mounts);
@@ -1386,14 +1493,20 @@ int main(int argc, const char *argv[])
 		exit(1);
 	}
 
-	// Write the pid file for the init system
-	write_pid_file();
-
+	/* The lock acquired above remains held across daemonization. */
+	if (write_pid_file()) {
+		destroy_rules();
+		destroy_fs_list(&filesystems);
+		destroy_fs_list(&ignored_mounts);
+		decision_config_destroy();
+		free_daemon_config(&config);
+		exit(1);
+	}
 	// Set strict umask
 	(void) umask( 0117 );
 
 	if (preconstruct_fifo(&config)) {
-		unlink(pidfile);
+		remove_pid_file();
 		msg(LOG_ERR, "Cannot construct a pipe");
 		exit(1);
 	}
@@ -1432,7 +1545,7 @@ int main(int argc, const char *argv[])
 		destroy_fs_list(&filesystems);
 		destroy_fs_list(&ignored_mounts);
 		free_daemon_config(&config);
-		unlink(pidfile);
+		remove_pid_file();
 		exit(1);
 	}
 
@@ -1443,7 +1556,7 @@ int main(int argc, const char *argv[])
 		destroy_fs_list(&filesystems);
 		destroy_fs_list(&ignored_mounts);
 		free_daemon_config(&config);
-		unlink(pidfile);
+		remove_pid_file();
 		exit(1);
 	}
 
@@ -1455,7 +1568,7 @@ int main(int argc, const char *argv[])
 		destroy_fs_list(&filesystems);
 		destroy_fs_list(&ignored_mounts);
 		free_daemon_config(&config);
-		unlink(pidfile);
+		remove_pid_file();
 		exit(1);
 	}
 
@@ -1471,7 +1584,7 @@ int main(int argc, const char *argv[])
 		destroy_fs_list(&filesystems);
 		destroy_fs_list(&ignored_mounts);
 		free_daemon_config(&config);
-		unlink(pidfile);
+		remove_pid_file();
 		exit(1);
 	}
 	pfd[0].events = POLLPRI;
@@ -1485,7 +1598,7 @@ int main(int argc, const char *argv[])
 		destroy_fs_list(&filesystems);
 		destroy_fs_list(&ignored_mounts);
 		free_daemon_config(&config);
-		unlink(pidfile);
+		remove_pid_file();
 		exit(1);
 	}
 	pfd[1].fd = init_fanotify(&config, m);
@@ -1558,7 +1671,6 @@ int main(int argc, const char *argv[])
 #ifdef HAVE_MALLINFO2
 	close_memory_report();
 #endif
-	unlink(pidfile);
 	// Reinstate the strict umask in case rpm messed with it
 	(void) umask( 0237 );
 	if (config.do_stat_report) {
@@ -1579,6 +1691,7 @@ int main(int argc, const char *argv[])
 	destroy_fs_list(&ignored_mounts);
 	decision_config_destroy();
 	free_daemon_config(&config);
+	remove_pid_file();
 
 	return 0;
 }
