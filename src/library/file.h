@@ -75,6 +75,8 @@ void file_init_failure_for_tests(file_init_status_t failure);
 void file_close(void);
 struct file_info *stat_file_entry(int fd)
 	__attr_dealloc_free __attr_fd_arg (1);
+int open_verified_regular_file(const char *path, const struct stat *expected,
+		struct stat *opened) __nonnull ((1, 2, 3));
 void file_info_reset_digest(struct file_info *info);
 file_hash_alg_t file_hash_alg(unsigned len);
 file_hash_alg_t file_hash_alg_fast(const char *digest);

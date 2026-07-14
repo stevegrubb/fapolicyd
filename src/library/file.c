@@ -393,6 +393,46 @@ struct file_info *stat_file_entry(int fd)
 	return NULL;
 }
 
+/*
+ * open_verified_regular_file - open a regular file matching prior stat data.
+ * @path: pathname to open.
+ * @expected: stat data collected before reopening @path.
+ * @opened: receives stat data for the opened descriptor.
+ *
+ * O_NOFOLLOW and O_NONBLOCK prevent a replacement symlink or FIFO from
+ * redirecting or stalling the caller. Comparing the opened inode to the
+ * prior stat result rejects a pathname replacement before inspection.
+ *
+ * Returns an owned descriptor on success, or -1 with errno set on failure.
+ */
+int open_verified_regular_file(const char *path, const struct stat *expected,
+	struct stat *opened)
+{
+	int fd, saved_errno;
+
+	fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+	if (fd < 0)
+		return -1;
+
+	if (fstat(fd, opened)) {
+		saved_errno = errno;
+		goto error;
+	}
+	if (S_ISREG(opened->st_mode) == 0 ||
+	    opened->st_dev != expected->st_dev ||
+	    opened->st_ino != expected->st_ino) {
+		saved_errno = ESTALE;
+		goto error;
+	}
+
+	return fd;
+
+error:
+	close(fd);
+	errno = saved_errno;
+	return -1;
+}
+
 
 // Returns 0 if equal and 1 if not equal
 int compare_file_infos(const struct file_info *p1, const struct file_info *p2)

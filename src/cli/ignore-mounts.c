@@ -827,6 +827,7 @@ static int inspect_mount_entry(const char *fpath, const struct stat *sb,
 {
 	int fd;
 	struct file_info info;
+	struct stat opened;
 	char buf[128];
 	char *mime;
 	unsigned int risks;
@@ -850,20 +851,20 @@ static int inspect_mount_entry(const char *fpath, const struct stat *sb,
 		return FTW_CONTINUE;
 
 	/* Open the file and collect metadata for libmagic. */
-	fd = open(fpath, O_RDONLY|O_CLOEXEC);
+	fd = open_verified_regular_file(fpath, sb, &opened);
 	if (fd < 0) {
-		fprintf(stderr, "Unable to open %s (%s)\n", fpath,
+		fprintf(stderr, "Unable to safely open %s (%s)\n", fpath,
 			strerror(errno));
 		scan_state.had_error = 1;
 		return FTW_CONTINUE;
 	}
 
 	memset(&info, 0, sizeof(info));
-	info.device = sb->st_dev;
-	info.inode = sb->st_ino;
-	info.mode = sb->st_mode;
-	info.size = sb->st_size;
-	info.time = sb->st_mtim;
+	info.device = opened.st_dev;
+	info.inode = opened.st_ino;
+	info.mode = opened.st_mode;
+	info.size = opened.st_size;
+	info.time = opened.st_mtim;
 
 	mime = get_file_type_from_fd(fd, &info, fpath, sizeof(buf), buf);
 	close(fd);
@@ -873,7 +874,7 @@ static int inspect_mount_entry(const char *fpath, const struct stat *sb,
 		return FTW_CONTINUE;
 	}
 
-	risks = classify_file_risks(fpath, sb, mime, scan_state.languages);
+	risks = classify_file_risks(fpath, &opened, mime, scan_state.languages);
 	record_risk_entry(fpath, risks, buf);
 
 	return FTW_CONTINUE;

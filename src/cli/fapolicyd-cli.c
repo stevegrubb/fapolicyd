@@ -965,6 +965,9 @@ static int check_file(const char *fpath,
 		struct FTW *s_unused __attribute__ ((unused)))
 {
 	int ret = FTW_CONTINUE;
+	struct file_info info = { 0 };
+	struct stat opened;
+	int fd;
 
 	/* nftw() leaves sb undefined for FTW_NS entries. */
 	if (typeflag == FTW_NS || typeflag == FTW_DNR) {
@@ -975,18 +978,25 @@ static int check_file(const char *fpath,
 	if (typeflag != FTW_F || S_ISREG(sb->st_mode) == 0)
 		return ret;
 
-	int fd = open(fpath, O_RDONLY|O_CLOEXEC);
-	if (fd >= 0) {
-		struct file_info info;
-		info.size = sb->st_size;
-
-		if (check_trust_database_readonly(fpath, &info, fd) != 1) {
-			path_found = 1;
-			fprintf(stderr, "%s is not trusted\n", fpath);
-		}
-
-		close(fd);
+	fd = open_verified_regular_file(fpath, sb, &opened);
+	if (fd < 0) {
+		fprintf(stderr, "Unable to safely open %s (%s)\n", fpath,
+			strerror(errno));
+		path_scan_error = 1;
+		return ret;
 	}
+
+	info.device = opened.st_dev;
+	info.inode = opened.st_ino;
+	info.mode = opened.st_mode;
+	info.size = opened.st_size;
+	info.time = opened.st_mtim;
+	if (check_trust_database_readonly(fpath, &info, fd) != 1) {
+		path_found = 1;
+		fprintf(stderr, "%s is not trusted\n", fpath);
+	}
+
+	close(fd);
 	return ret;
 }
 

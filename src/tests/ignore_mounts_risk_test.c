@@ -130,6 +130,75 @@ static void test_unstatable_walk_entry(void)
 	scan_state.had_error = 0;
 }
 
+/*
+ * A pathname can change after nftw() stats it. The reopen helper must retain
+ * only the exact regular object seen by the walk, without following a link or
+ * blocking on a replacement FIFO.
+ */
+static void test_walked_open_rejects_replacements(void)
+{
+	char path[] = "/tmp/fapolicyd-walked-open.XXXXXX";
+	char replacement_path[] = "/tmp/fapolicyd-walked-replace.XXXXXX";
+	char link_path[sizeof(path) + 8];
+	char pipe_path[sizeof(path) + 8];
+	struct stat walked, opened;
+	int fd, reopened;
+
+	fd = mkstemp(path);
+	if (fd == -1)
+		error(1, errno, "mkstemp failed");
+	if (fstat(fd, &walked))
+		error(1, errno, "fstat failed");
+	if (close(fd))
+		error(1, errno, "close failed");
+
+	reopened = open_verified_regular_file(path, &walked, &opened);
+	if (reopened == -1)
+		error(1, errno, "regular file reopen failed");
+	if (opened.st_dev != walked.st_dev || opened.st_ino != walked.st_ino)
+		error(1, 0, "regular file reopen changed identity");
+	if (close(reopened))
+		error(1, errno, "reopened file close failed");
+
+	fd = mkstemp(replacement_path);
+	if (fd == -1)
+		error(1, errno, "replacement mkstemp failed");
+	if (close(fd))
+		error(1, errno, "replacement close failed");
+	if (rename(replacement_path, path))
+		error(1, errno, "replacement rename failed");
+	errno = 0;
+	reopened = open_verified_regular_file(path, &walked, &opened);
+	if (reopened != -1 || errno != ESTALE)
+		error(1, errno, "replacement regular file was accepted");
+	if (lstat(path, &walked))
+		error(1, errno, "lstat replacement failed");
+
+	snprintf(link_path, sizeof(link_path), "%s.link", path);
+	if (symlink(path, link_path))
+		error(1, errno, "symlink failed");
+	reopened = open_verified_regular_file(link_path, &walked, &opened);
+	if (reopened != -1)
+		error(1, 0, "replacement symlink was accepted");
+	if (unlink(link_path))
+		error(1, errno, "unlink symlink failed");
+
+	snprintf(pipe_path, sizeof(pipe_path), "%s.fifo", path);
+	if (mkfifo(pipe_path, 0600))
+		error(1, errno, "mkfifo failed");
+	if (lstat(pipe_path, &walked))
+		error(1, errno, "lstat fifo failed");
+	alarm(2);
+	reopened = open_verified_regular_file(pipe_path, &walked, &opened);
+	alarm(0);
+	if (reopened != -1 || errno != ESTALE)
+		error(1, errno, "replacement FIFO was accepted");
+	if (unlink(pipe_path))
+		error(1, errno, "unlink fifo failed");
+	if (unlink(path))
+		error(1, errno, "unlink regular file failed");
+}
+
 int main(void)
 {
 	avl_tree_t languages;
@@ -206,6 +275,7 @@ int main(void)
 		error(1, 0, "failed to add language MIME");
 	test_language_mime_loading();
 	test_unstatable_walk_entry();
+	test_walked_open_rejects_replacements();
 
 	for (unsigned int i = 0; risk_cases[i].label; i++)
 		expect_risk(&risk_cases[i]);
