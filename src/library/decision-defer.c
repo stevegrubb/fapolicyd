@@ -32,10 +32,11 @@
  * of slot and is used during shutdown cleanup.
  *
  * The decision worker owns this array. No producer writes to it, and no other
- * thread pops from it. That keeps the implementation simple and makes fd
- * ownership explicit: a deferred entry owns the fanotify permission fd in its
- * embedded decision_event_t until the entry is popped for normal processing or
- * shutdown replies to it.
+ * thread pops from it. The report-owning worker can snapshot/reset metrics,
+ * so each public operation serializes that observation with mutations. This
+ * keeps fd ownership explicit: a deferred entry owns the fanotify permission
+ * fd in its embedded decision_event_t until the entry is popped for normal
+ * processing or shutdown replies to it.
  *
  * The array is intentionally bounded. If it is full, callers must fall back to
  * the historical eviction behavior so memory use and blocked kernel permission
@@ -62,6 +63,41 @@ struct decision_defer_entry {
 	/* Non-zero when this array entry currently owns a deferred event. */
 	int used;
 };
+
+/*
+ * defer_lock - acquire exclusive access to one defer queue.
+ * @defer: initialized queue to lock.
+ *
+ * Returns zero when the queue is locked, or -1 with errno set otherwise.
+ */
+static int defer_lock(struct decision_defer_queue *defer)
+{
+	int rc;
+
+	if (defer == NULL || !defer->lock_initialized) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	rc = pthread_mutex_lock(&defer->lock);
+	if (rc) {
+		errno = rc;
+		return -1;
+	}
+
+	return 0;
+}
+
+/*
+ * defer_unlock - release one defer queue after a state operation.
+ * @defer: locked queue to release.
+ *
+ * Returns nothing.
+ */
+static void defer_unlock(struct decision_defer_queue *defer)
+{
+	(void)pthread_mutex_unlock(&defer->lock);
+}
 
 /*
  * defer_now_ns - read monotonic time for defer age reporting.
@@ -92,6 +128,7 @@ int decision_defer_init(struct decision_defer_queue *defer,
 		unsigned int subj_cache_size)
 {
 	unsigned int capacity;
+	int rc;
 
 	if (defer == NULL) {
 		errno = EINVAL;
@@ -99,13 +136,22 @@ int decision_defer_init(struct decision_defer_queue *defer,
 	}
 
 	memset(defer, 0, sizeof(*defer));
+	rc = pthread_mutex_init(&defer->lock, NULL);
+	if (rc) {
+		errno = rc;
+		return -1;
+	}
+	defer->lock_initialized = 1;
 	capacity = subj_cache_size / DECISION_DEFER_RATIO;
 	if (capacity < DECISION_DEFER_MIN)
 		capacity = DECISION_DEFER_MIN;
 
 	defer->entries = calloc(capacity, sizeof(struct decision_defer_entry));
-	if (defer->entries == NULL)
+	if (defer->entries == NULL) {
+		pthread_mutex_destroy(&defer->lock);
+		memset(defer, 0, sizeof(*defer));
 		return -1;
+	}
 
 	defer->capacity = capacity;
 	return 0;
@@ -121,7 +167,18 @@ void decision_defer_destroy(struct decision_defer_queue *defer)
 	if (defer == NULL)
 		return;
 
+	if (!defer->lock_initialized) {
+		free(defer->entries);
+		memset(defer, 0, sizeof(*defer));
+		return;
+	}
+
+	if (defer_lock(defer))
+		return;
 	free(defer->entries);
+	defer->entries = NULL;
+	defer_unlock(defer);
+	pthread_mutex_destroy(&defer->lock);
 	memset(defer, 0, sizeof(*defer));
 }
 
@@ -132,7 +189,7 @@ void decision_defer_destroy(struct decision_defer_queue *defer)
  *
  * This is a bounded O(capacity) linear scan. The defer array is intentionally
  * small and fixed-size, and callers avoid this scan entirely when current is
- * zero.
+ * zero. The caller holds defer->lock.
  *
  * Returns the oldest matching entry, or NULL when none exists.
  */
@@ -177,15 +234,19 @@ int decision_defer_push(struct decision_defer_queue *defer,
 		const decision_event_t *event)
 {
 	unsigned int i;
+	int rc = -1;
 
 	if (defer == NULL || event == NULL) {
 		errno = EINVAL;
 		return -1;
 	}
 
+	if (defer_lock(defer))
+		return -1;
+
 	if (defer->current == defer->capacity) {
 		errno = ENOSPC;
-		return -1;
+		goto out;
 	}
 
 	for (i = 0; i < defer->capacity; i++) {
@@ -205,11 +266,14 @@ int decision_defer_push(struct decision_defer_queue *defer,
 		defer->deferred_events++;
 		if (defer->current > defer->max_depth)
 			defer->max_depth = defer->current;
-		return 0;
+		rc = 0;
+		goto out;
 	}
 
 	errno = ENOSPC;
-	return -1;
+out:
+	defer_unlock(defer);
+	return rc;
 }
 
 /*
@@ -249,7 +313,14 @@ static int pop_entry(struct decision_defer_queue *defer,
 int decision_defer_pop_slot(struct decision_defer_queue *defer,
 		unsigned int slot, decision_event_t *event)
 {
-	return pop_entry(defer, oldest_entry(defer, slot), event);
+	int rc;
+
+	if (defer == NULL || event == NULL || defer_lock(defer))
+		return 0;
+
+	rc = pop_entry(defer, oldest_entry(defer, slot), event);
+	defer_unlock(defer);
+	return rc;
 }
 
 /*
@@ -272,9 +343,13 @@ int decision_defer_pop_if(struct decision_defer_queue *defer,
 	struct decision_defer_entry *oldest = NULL;
 	unsigned int i;
 	unsigned int seen = 0;
+	int rc = 0;
 
-	if (defer == NULL || match == NULL || defer->current == 0)
+	if (defer == NULL || match == NULL || event == NULL ||
+	    defer_lock(defer))
 		return 0;
+	if (defer->current == 0)
+		goto out;
 
 	for (i = 0; i < defer->capacity; i++) {
 		struct decision_defer_entry *entry = &defer->entries[i];
@@ -289,7 +364,10 @@ int decision_defer_pop_if(struct decision_defer_queue *defer,
 			break;
 	}
 
-	return pop_entry(defer, oldest, event);
+	rc = pop_entry(defer, oldest, event);
+out:
+	defer_unlock(defer);
+	return rc;
 }
 
 /*
@@ -302,8 +380,15 @@ int decision_defer_pop_if(struct decision_defer_queue *defer,
 int decision_defer_pop_any(struct decision_defer_queue *defer,
 		decision_event_t *event)
 {
-	return pop_entry(defer, oldest_entry(defer, DECISION_EVENT_NO_SLOT),
-			 event);
+	int rc;
+
+	if (defer == NULL || event == NULL || defer_lock(defer))
+		return 0;
+
+	rc = pop_entry(defer, oldest_entry(defer, DECISION_EVENT_NO_SLOT),
+		       event);
+	defer_unlock(defer);
+	return rc;
 }
 
 /*
@@ -313,8 +398,29 @@ int decision_defer_pop_any(struct decision_defer_queue *defer,
  */
 void decision_defer_count_fallback(struct decision_defer_queue *defer)
 {
-	if (defer)
-		defer->fallbacks++;
+	if (defer == NULL || defer_lock(defer))
+		return;
+
+	defer->fallbacks++;
+	defer_unlock(defer);
+}
+
+/*
+ * decision_defer_has_events - test whether deferred events are queued.
+ * @defer: queue state to inspect.
+ *
+ * Returns non-zero when the queue has at least one deferred event.
+ */
+int decision_defer_has_events(struct decision_defer_queue *defer)
+{
+	int has_events;
+
+	if (defer == NULL || defer_lock(defer))
+		return 0;
+
+	has_events = defer->current != 0;
+	defer_unlock(defer);
+	return has_events;
 }
 
 /*
@@ -354,7 +460,7 @@ void decision_defer_metrics_snapshot_reset(struct decision_defer_queue *defer,
 		return;
 
 	memset(metrics, 0, sizeof(*metrics));
-	if (defer == NULL)
+	if (defer == NULL || defer_lock(defer))
 		return;
 
 	metrics->capacity = defer->capacity;
@@ -369,6 +475,7 @@ void decision_defer_metrics_snapshot_reset(struct decision_defer_queue *defer,
 		defer->max_depth = defer->current;
 		defer->fallbacks = 0;
 	}
+	defer_unlock(defer);
 }
 
 /*

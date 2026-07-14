@@ -1135,7 +1135,7 @@ static unsigned int release_ready_deferred_events(
 	decision_event_t event;
 	unsigned int count = 0;
 
-	while (defer->current &&
+	while (decision_defer_has_events(defer) &&
 	       decision_defer_pop_if(defer, deferred_event_is_ready,
 				     NULL, &event)) {
 		dispatch_decision_event(worker, &event, rpt_is_stale);
@@ -1698,15 +1698,16 @@ static void *decision_worker_main(void *arg)
 			struct timespec timeout;
 			unsigned int timeout_sec = HEALTH_MONITOR_INTERVAL_SEC;
 
-			if (worker->context->defer_queue.current)
+			if (decision_defer_has_events(
+				    &worker->context->defer_queue))
 				timeout_sec = DEFER_RECHECK_INTERVAL_SEC;
 			if (clock_gettime(CLOCK_REALTIME, &timeout) == 0) {
 				timeout.tv_sec += timeout_sec;
 				errno = 0;
 				rc = q_timed_dequeue(worker->queue, &event,
 						     &timeout);
-				timed_for_defer =
-					worker->context->defer_queue.current != 0;
+				timed_for_defer = decision_defer_has_events(
+					&worker->context->defer_queue);
 			} else {
 				rc = q_dequeue(worker->queue, &event);
 			}

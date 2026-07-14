@@ -99,6 +99,7 @@ decision_defer_test_CPPFLAGS = \
 	-I${top_builddir} \
 	-I${top_srcdir}/src/library/ \
 	-I${top_srcdir}/src/daemon/
+decision_defer_test_LDFLAGS = -pthread
 decision_config_test_SOURCES = decision_config_test.c
 decision_config_test_LDADD = ${top_builddir}/src/.libs/libfapolicyd.la
 daemon_config_test_SOURCES = daemon_config_test.c test-stubs.c

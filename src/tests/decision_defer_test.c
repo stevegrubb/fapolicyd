@@ -2,11 +2,14 @@
  * decision_defer_test.c - unit tests for subject-slot decision deferral
  */
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "decision-defer.h"
+
+#define METRICS_SNAPSHOT_ITERATIONS 10000
 
 #define CHECK(cond, code, msg) \
 	do { \
@@ -36,6 +39,35 @@ static decision_event_t make_event(pid_t pid, int fd, unsigned int slot)
 	event.subject_slot = slot;
 	event.completed_subject_slot = slot + 100;
 	return event;
+}
+
+struct metrics_snapshot_mutator {
+	struct decision_defer_queue *defer;
+	int failed;
+};
+
+/*
+ * metrics_snapshot_mutator_run - mutate a defer queue during reporting.
+ * @data: struct metrics_snapshot_mutator state.
+ *
+ * Returns NULL after repeatedly adding and removing one deferred event.
+ */
+static void *metrics_snapshot_mutator_run(void *data)
+{
+	struct metrics_snapshot_mutator *mutator = data;
+	decision_event_t event, out;
+	unsigned int i;
+
+	for (i = 0; i < METRICS_SNAPSHOT_ITERATIONS; i++) {
+		event = make_event(600 + i, 100 + i, i % 3);
+		if (decision_defer_push(mutator->defer, &event) ||
+		    decision_defer_pop_any(mutator->defer, &out) != 1) {
+			mutator->failed = 1;
+			break;
+		}
+	}
+
+	return NULL;
 }
 
 /*
@@ -298,6 +330,61 @@ static int test_pop_if_keeps_matching_order(void)
 	return 0;
 }
 
+/*
+ * test_concurrent_metrics_snapshot - report while a worker mutates defers.
+ *
+ * Reporting runs on a different decision worker, so snapshot/reset must see
+ * one complete queue state even while the owner adds and removes events.
+ *
+ * Returns 0 on success, or a distinct failure code.
+ */
+static int test_concurrent_metrics_snapshot(void)
+{
+	struct decision_defer_queue defer;
+	struct decision_defer_metrics metrics;
+	struct metrics_snapshot_mutator mutator;
+	pthread_t thread;
+	unsigned int i;
+	int snapshot_valid = 1;
+	int rc;
+
+	CHECK(decision_defer_init(&defer, 1) == 0, 70,
+	      "[ERROR:70] concurrent defer init failed");
+	mutator.defer = &defer;
+	mutator.failed = 0;
+	rc = pthread_create(&thread, NULL, metrics_snapshot_mutator_run,
+			    &mutator);
+	if (rc) {
+		decision_defer_destroy(&defer);
+		fprintf(stderr, "[ERROR:71] concurrent mutator create failed\n");
+		return 71;
+	}
+
+	for (i = 0; i < METRICS_SNAPSHOT_ITERATIONS; i++) {
+		decision_defer_metrics_snapshot_reset(&defer, &metrics, 1);
+		if (metrics.capacity != defer.capacity ||
+		    metrics.current_depth > metrics.capacity ||
+		    metrics.max_depth < metrics.current_depth) {
+			snapshot_valid = 0;
+			break;
+		}
+	}
+
+	rc = pthread_join(thread, NULL);
+	if (rc) {
+		decision_defer_destroy(&defer);
+		fprintf(stderr, "[ERROR:72] concurrent mutator join failed\n");
+		return 72;
+	}
+	decision_defer_destroy(&defer);
+	CHECK(mutator.failed == 0, 73,
+	      "[ERROR:73] concurrent defer mutation failed");
+	CHECK(snapshot_valid, 74,
+	      "[ERROR:74] concurrent defer snapshot was inconsistent");
+
+	return 0;
+}
+
 /* main - run defer queue unit tests. */
 int main(void)
 {
@@ -316,6 +403,10 @@ int main(void)
 		return rc;
 
 	rc = test_pop_if_keeps_matching_order();
+	if (rc)
+		return rc;
+
+	rc = test_concurrent_metrics_snapshot();
 	if (rc)
 		return rc;
 

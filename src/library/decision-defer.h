@@ -13,6 +13,7 @@
 #ifndef DECISION_DEFER_HEADER
 #define DECISION_DEFER_HEADER
 
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include "decision-event.h"
@@ -32,6 +33,9 @@ struct decision_defer_metrics {
 struct decision_defer_entry;
 
 struct decision_defer_queue {
+	/* Serializes worker mutations with report snapshot/reset operations. */
+	pthread_mutex_t lock;
+	int lock_initialized;
 	struct decision_defer_entry *entries;
 	unsigned int capacity;
 	unsigned int current;
@@ -57,6 +61,7 @@ int decision_defer_pop_if(struct decision_defer_queue *defer,
 int decision_defer_pop_any(struct decision_defer_queue *defer,
 		decision_event_t *event);
 void decision_defer_count_fallback(struct decision_defer_queue *defer);
+int decision_defer_has_events(struct decision_defer_queue *defer);
 void decision_defer_metrics_snapshot_reset(struct decision_defer_queue *defer,
 		struct decision_defer_metrics *metrics, int reset);
 void decision_defer_config_report(FILE *f,
