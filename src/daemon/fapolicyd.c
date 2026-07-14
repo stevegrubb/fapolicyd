@@ -1075,8 +1075,10 @@ int already_running(void)
 	int pidfd = open(pidfile, O_RDONLY);
 	if (pidfd >= 0) {
 		char pid_buf[16];
+		int read_rc;
 
-		if (fd_fgets_r(st, pid_buf, sizeof(pid_buf), pidfd)) {
+		read_rc = fd_fgets_r(st, pid_buf, sizeof(pid_buf), pidfd);
+		if (read_rc > 0) {
 			int pid;
 			char exe_buf[80], my_path[80];
 
@@ -1112,8 +1114,11 @@ good:
 			close(pidfd);
 			unlink(pidfile);
 			return 0;
-		} else
-		    msg(LOG_ERR, "fapolicyd pid file found but unreadable");
+		} else if (read_rc < 0)
+			msg(LOG_ERR, "fapolicyd pid file cannot be read: %s",
+			    strerror(errno));
+		else
+			msg(LOG_ERR, "fapolicyd pid file found but unreadable");
 err_out: // At this point, we have a pid file, let's just assume it's alive
 	 // because if 2 are running, it deadlocks the machine
 

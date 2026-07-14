@@ -682,7 +682,7 @@ static int check_watch_fs(void)
 {
 	char buf[PATH_MAX * 2], device[1025], point[4097];
 	char type[32], mntops[128];
-	int fs_req, fs_passno, fd, found = 0, alloc_err = 0;
+	int fs_req, fs_passno, fd, found = 0, alloc_err = 0, read_err = 0;
 	list_t fs, mnt;
 	char *ptr, *saved, *tmp;
 
@@ -737,7 +737,15 @@ static int check_watch_fs(void)
 	// Build the list of mount point types
 	list_init(&mnt);
 	do {
-		if (fd_fgets_r(st, buf, sizeof(buf), fd)) {
+		int read_rc = fd_fgets_r(st, buf, sizeof(buf), fd);
+
+		/* A read error does not initialize buf or mark the state at EOF. */
+		if (read_rc < 0) {
+			fprintf(stderr, "Unable to read mounts\n");
+			read_err = 1;
+			break;
+		}
+		if (read_rc > 0) {
 			sscanf(buf, "%1024s %4096s %31s %127s %d %d\n",
 			       device,point, type, mntops, &fs_req, &fs_passno);
 			// Some file systems are not watchable
@@ -779,11 +787,12 @@ static int check_watch_fs(void)
 	reset_config();
 	list_empty(&fs);
 	list_empty(&mnt);
-	if (found == 0)
-		printf("Nothing appears missing\n");
-
+	if (read_err)
+		return CLI_EXIT_IO;
 	if (alloc_err)
 		return CLI_EXIT_INTERNAL;
+	if (found == 0)
+		printf("Nothing appears missing\n");
 	return CLI_EXIT_SUCCESS;
 }
 
@@ -1169,8 +1178,10 @@ static int get_daemon_pid(unsigned int *pid, char *reason, size_t reason_len)
 	pidfd = open(pidfile, O_RDONLY);
 	if (pidfd >= 0) {
 		char pid_buf[16];
+		int read_rc;
 
-		if (fd_fgets_r(st, pid_buf, sizeof(pid_buf), pidfd)) {
+		read_rc = fd_fgets_r(st, pid_buf, sizeof(pid_buf), pidfd);
+		if (read_rc > 0) {
 			char exe_buf[64];
 
 			errno = 0;
@@ -1195,7 +1206,10 @@ static int get_daemon_pid(unsigned int *pid, char *reason, size_t reason_len)
 			fd_fgets_destroy(st);
 			return 0;
 		}
-		snprintf(reason, reason_len, "unreadable pid file");
+		if (read_rc < 0)
+			snprintf(reason, reason_len, "can't read pid file");
+		else
+			snprintf(reason, reason_len, "unreadable pid file");
 	} else
 		snprintf(reason, reason_len, "no pid file");
 
@@ -1239,12 +1253,23 @@ retry:
 	}
 
 	fd_fgets_clear_r(st);
-	do {
+	for (;;) {
 		char buf[80];
+		int read_rc;
 
-		if (fd_fgets_r(st, buf, sizeof(buf), rpt_fd))
+		read_rc = fd_fgets_r(st, buf, sizeof(buf), rpt_fd);
+		/* fd_fgets_r() leaves buf and EOF unchanged on read errors. */
+		if (read_rc < 0) {
+			*reason = "failed reading report";
+			close(rpt_fd);
+			fd_fgets_destroy(st);
+			return 1;
+		}
+		if (read_rc > 0)
 			write(1, buf, strlen(buf));
-	} while (!fd_fgets_eof_r(st));
+		if (fd_fgets_eof_r(st))
+			break;
+	}
 
 	close(rpt_fd);
 	fd_fgets_destroy(st);

@@ -263,6 +263,24 @@ static void test_reject_self_managed_override(void)
 }
 
 /*
+ * An I/O error is distinct from EOF: callers must not consume the output
+ * buffer after fd_fgets_r() returns -1 because it leaves both buffer and
+ * state untouched.
+ */
+static void test_read_error_preserves_caller_state(void)
+{
+	char buf[32] = "unchanged";
+	fd_fgets_state_t *st;
+
+	st = fd_fgets_init();
+	assert(st);
+	assert(fd_fgets_r(st, buf, sizeof(buf), -1) == -1);
+	assert(strcmp(buf, "unchanged") == 0);
+	assert(fd_fgets_eof_r(st) == 0);
+	fd_fgets_destroy(st);
+}
+
+/*
  * Map README.md directly and parse it without issuing read() calls.  This is
  * the MEM_MMAP_FILE path that the daemon relies on for audit log replay.
  */
@@ -372,6 +390,7 @@ int main(void)
 	test_mmap_buffer();
 	test_deferred_compaction();
 	test_reject_self_managed_override();
+	test_read_error_preserves_caller_state();
 	test_mmap_file_no_trailing_newline();
 	test_mmap_file_readme();
 	printf("fd-fgets_r tests: all passed\n");
