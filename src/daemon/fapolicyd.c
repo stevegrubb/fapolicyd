@@ -1214,8 +1214,13 @@ int already_running(void)
 			    strerror(errno));
 			return 1;
 		}
+		/*
+		 * flock permits an exclusive lock through a read-only descriptor.
+		 * Keep the pid file private so an unprivileged process cannot hold
+		 * a stale inode locked after an unclean daemon shutdown.
+		 */
 		pid_file_fd = open(pidfile, O_CREAT | O_EXCL | O_NOFOLLOW |
-				   O_RDWR | O_CLOEXEC, 0644);
+				   O_RDWR | O_CLOEXEC, 0600);
 		if (pid_file_fd >= 0) {
 			created = 1;
 			break;

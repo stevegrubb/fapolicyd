@@ -60,7 +60,7 @@ unit instead:
 ```ini
 [Service]
 Type=forking
-PIDFile=/run/fapolicyd.pid
+PIDFile=/run/fapolicyd/fapolicyd.pid
 ExecStart=/usr/sbin/fapolicyd
 Restart=on-failure
 RestartSec=1s

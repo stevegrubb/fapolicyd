@@ -226,7 +226,7 @@ case x$enable_systemd_watchdog in
 	xno)
 		FAPOLICYD_SERVICE_TYPE=forking
 		FAPOLICYD_SERVICE_NOTIFY_ACCESS=
-		FAPOLICYD_SERVICE_PIDFILE=PIDFile=/run/fapolicyd.pid
+		FAPOLICYD_SERVICE_PIDFILE=PIDFile=/run/fapolicyd/fapolicyd.pid
 		FAPOLICYD_SERVICE_EXEC=/usr/sbin/fapolicyd
 		FAPOLICYD_SERVICE_WATCHDOG=
 		;;

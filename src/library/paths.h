@@ -39,7 +39,7 @@
 #define METRICS_REPORT  "/run/fapolicyd/fapolicyd.metrics"
 #define TIMING_REPORT   "/run/fapolicyd/fapolicyd.timing"
 #define fifo_path       "/run/fapolicyd/fapolicyd.fifo"
-#define pidfile         "/run/fapolicyd.pid"
+#define pidfile         RUN_DIR "fapolicyd.pid"
 
 #define OLD_FILTER_FILE "/etc/fapolicyd/rpm-filter.conf"
 #define FILTER_FILE     "/etc/fapolicyd/fapolicyd-filter.conf"

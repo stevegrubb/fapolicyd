@@ -260,7 +260,11 @@ fi
 %ghost %attr(440,%{name},%{name}) %verify(not md5 size mtime) %{_localstatedir}/log/%{name}-access.log
 %attr(770,root,%{name}) %dir %{_localstatedir}/lib/%{name}
 %attr(770,root,%{name}) %dir /run/%{name}
+%ghost %attr(600,root,root) %verify(not md5 size mtime) /run/%{name}/%{name}.pid
 %ghost %attr(660,root,%{name}) /run/%{name}/%{name}.fifo
+%ghost %attr(640,%{name},%{name}) %verify(not md5 size mtime) /run/%{name}/%{name}.state
+%ghost %attr(640,%{name},%{name}) %verify(not md5 size mtime) /run/%{name}/%{name}.metrics
+%ghost %attr(640,%{name},%{name}) %verify(not md5 size mtime) /run/%{name}/%{name}.timing
 %ghost %attr(660,%{name},%{name}) %verify(not md5 size mtime) %{_localstatedir}/lib/%{name}/data.mdb
 %ghost %attr(660,%{name},%{name}) %verify(not md5 size mtime) %{_localstatedir}/lib/%{name}/lock.mdb
 %if 0%{?fedora} || 0%{?rhel} > 9

@@ -11,6 +11,7 @@
 - Allow rules to express file/dir names with spaces using double quotes
 - Allow packages to append MIME types to the %languages policy set
 - fapolicyd-cli now has --ftype-ext emits NUL-delimited path and MIME pairs
+- Move the pid file into /run/fapolicyd and restrict it to the daemon
 
 1.6
 - Many internal changes
