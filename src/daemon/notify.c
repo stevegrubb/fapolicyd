@@ -515,7 +515,9 @@ void handle_events(void)
 		do {
 			len = read(fd, (void *) buf, sizeof(buf));
 		} while (len == -1 && errno == EINTR && stop == false);
-		if (len == -1 && errno != EAGAIN) {
+		if (len == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
+			return;
+		if (len == -1) {
 			// If we get this, we have no access to the file. We
 			// cannot formulate a reply either to deny it because
 			// we have nothing to work with.
@@ -586,3 +588,17 @@ void handle_events(void)
 		metadata = FAN_EVENT_NEXT(metadata, len);
 	}
 }
+
+#ifdef TEST_SUBJECT_DEFER
+/*
+ * test_notify_set_fanotify_fd - install a synthetic fd for read-loop tests.
+ * @test_fd: fd borrowed from the unit test, or -1 to disable reads.
+ *
+ * The test owns @test_fd and must close it after clearing this reference.
+ * Returns nothing.
+ */
+void test_notify_set_fanotify_fd(int test_fd)
+{
+	fd = test_fd;
+}
+#endif

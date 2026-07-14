@@ -658,7 +658,9 @@ void fanotify_fs_error_handle_events(void)
 		do {
 			len = read(fs_error_fd, (void *)buf, sizeof(buf));
 		} while (len == -1 && errno == EINTR && stop == false);
-		if (len == -1 && errno != EAGAIN) {
+		if (len == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
+			return;
+		if (len == -1) {
 			msg(LOG_ERR, "Error receiving fanotify_event (%s)",
 			    strerror(errno));
 			return;
@@ -678,3 +680,17 @@ void fanotify_fs_error_handle_events(void)
 		metadata = FAN_EVENT_NEXT(metadata, len);
 	}
 }
+
+#ifdef TEST_SUBJECT_DEFER
+/*
+ * test_fanotify_fs_error_set_fd - install a synthetic fd for read-loop tests.
+ * @test_fd: fd borrowed from the unit test, or -1 to disable reads.
+ *
+ * The test owns @test_fd and must close it after clearing this reference.
+ * Returns nothing.
+ */
+void test_fanotify_fs_error_set_fd(int test_fd)
+{
+	fs_error_fd = test_fd;
+}
+#endif

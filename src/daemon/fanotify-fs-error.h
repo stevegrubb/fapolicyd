@@ -27,4 +27,8 @@ int fanotify_fs_error_handle_event(
 unsigned long getFanotifyFilesystemErrors(void);
 void fanotify_fs_error_report(FILE *f);
 
+#ifdef TEST_SUBJECT_DEFER
+void test_fanotify_fs_error_set_fd(int test_fd);
+#endif
+
 #endif

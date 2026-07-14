@@ -48,4 +48,8 @@ unsigned long getKernelQueueOverflow(void);
 unsigned int fanotify_active_worker_count(void);
 void nudge_queue(void);
 
+#ifdef TEST_SUBJECT_DEFER
+void test_notify_set_fanotify_fd(int test_fd);
+#endif
+
 #endif

@@ -4,6 +4,7 @@
 #include "config.h"
 #include <error.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -13,6 +14,7 @@
 #include <sys/fanotify.h>
 #include <sys/timerfd.h>
 #include <time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "failure-action.h"
@@ -218,6 +220,63 @@ static void read_fanotify_health_report(char *buf, size_t size)
 	used = fread(buf, 1, size - 1, f);
 	buf[used] = 0;
 	fclose(f);
+}
+
+/*
+ * test_nonblocking_handler_returns - run an empty nonblocking read in a child.
+ * @set_fd: test hook that installs the empty pipe descriptor.
+ * @handler: fanotify read loop under test.
+ * @fd: nonblocking read side of an empty pipe.
+ *
+ * The alarm makes the regression fail rather than hanging the test suite when
+ * a handler retries EAGAIN forever. Returns nothing. Exits on test failure.
+ */
+static void test_nonblocking_handler_returns(void (*set_fd)(int),
+		void (*handler)(void), int fd)
+{
+	int status;
+	pid_t pid;
+
+	pid = fork();
+	CHECK(pid >= 0, 168, "[ERROR:168] fork failed");
+	if (pid == 0) {
+		set_fd(fd);
+		alarm(1);
+		handler();
+		_exit(0);
+	}
+
+	CHECK(waitpid(pid, &status, 0) == pid, 169,
+	      "[ERROR:169] waitpid failed");
+	CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0, 170,
+	      "[ERROR:170] nonblocking fanotify handler did not return");
+}
+
+/*
+ * test_nonblocking_fanotify_reads - verify EAGAIN ends both fanotify drains.
+ *
+ * A poll readiness notification can race with another drain. The next
+ * nonblocking read then returns EAGAIN and must return to poll instead of
+ * spinning. Returns nothing. Exits on test failure.
+ */
+static void test_nonblocking_fanotify_reads(void)
+{
+	int pipe_fds[2];
+	int flags;
+
+	CHECK(pipe(pipe_fds) == 0, 171,
+	      "[ERROR:171] nonblocking pipe setup failed");
+	flags = fcntl(pipe_fds[0], F_GETFL);
+	CHECK(flags >= 0, 172, "[ERROR:172] failed reading pipe flags");
+	CHECK(fcntl(pipe_fds[0], F_SETFL, flags | O_NONBLOCK) == 0, 173,
+	      "[ERROR:173] failed setting nonblocking pipe");
+
+	test_nonblocking_handler_returns(test_notify_set_fanotify_fd,
+					 handle_events, pipe_fds[0]);
+	test_nonblocking_handler_returns(test_fanotify_fs_error_set_fd,
+					 fanotify_fs_error_handle_events, pipe_fds[0]);
+	close(pipe_fds[0]);
+	close(pipe_fds[1]);
 }
 
 /*
@@ -993,6 +1052,7 @@ int main(void)
 	test_deferred_dispatch_refreshes_health();
 	test_interval_report_deadline();
 	test_interval_report_disable_closes_timer();
+	test_nonblocking_fanotify_reads();
 
 	before = getKernelQueueOverflow();
 	metadata.mask = 0;
