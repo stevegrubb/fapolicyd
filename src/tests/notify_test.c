@@ -7,12 +7,15 @@
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/fanotify.h>
+#include <sys/socket.h>
 #include <sys/timerfd.h>
+#include <sys/un.h>
 #include <time.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -355,6 +358,78 @@ static void test_systemd_notify_runtime_gate(void)
 	unsetenv("WATCHDOG_PID");
 	unsetenv("WATCHDOG_USEC");
 	unsetenv("NOTIFY_SOCKET");
+}
+
+/*
+ * test_systemd_notify_full_queue - verify notification sends never block.
+ *
+ * A full AF_UNIX datagram receive queue must make READY fail with EAGAIN so
+ * the daemon can service fanotify events before retrying. Returns nothing.
+ * Exits on test failure.
+ */
+static void test_systemd_notify_full_queue(void)
+{
+#ifdef FAPOLICYD_ENABLE_SYSTEMD_WATCHDOG
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	char notify_path[sizeof(addr.sun_path)];
+	char buf[8];
+	int fill_fds[16];
+	socklen_t addr_len;
+	size_t path_len;
+	unsigned int fill_fd_count = 0, i;
+	int receive_fd, rc;
+
+	snprintf(notify_path, sizeof(notify_path),
+		 "@fapolicyd-notify-test-%ld", (long)getpid());
+	path_len = strlen(notify_path + 1);
+	memcpy(addr.sun_path + 1, notify_path + 1, path_len);
+	addr_len = offsetof(struct sockaddr_un, sun_path) + 1 + path_len;
+
+	receive_fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	CHECK(receive_fd >= 0, 193,
+	      "[ERROR:193] failed creating notify receive socket");
+	CHECK(bind(receive_fd, (const struct sockaddr *)&addr, addr_len) == 0,
+	      194, "[ERROR:194] failed binding notify receive socket");
+	/* A sender can fill its own buffer before the shared receive queue. */
+	for (i = 0; i < 16; i++) {
+		int sent = 0;
+
+		fill_fds[i] = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+		CHECK(fill_fds[i] >= 0, 195,
+		      "[ERROR:195] failed creating notify fill socket");
+		fill_fd_count++;
+		do {
+			rc = sendto(fill_fds[i], "FILL", 4, MSG_DONTWAIT,
+				    (const struct sockaddr *)&addr, addr_len);
+			if (rc == 4)
+				sent++;
+		} while (rc == 4);
+		CHECK(rc == -1 && (errno == EAGAIN || errno == EWOULDBLOCK),
+		      196, "[ERROR:196] failed filling notify receive queue");
+		if (sent == 0)
+			break;
+	}
+	CHECK(i < 16, 201,
+	      "[ERROR:201] notify queue exceeds test fill capacity");
+	CHECK(setenv("NOTIFY_SOCKET", notify_path, 1) == 0, 197,
+	      "[ERROR:197] failed setting full notify socket");
+
+	systemd_notify_set_enabled(1);
+	alarm(1);
+	rc = systemd_notify_ready();
+	alarm(0);
+	CHECK(rc == -1 && (errno == EAGAIN || errno == EWOULDBLOCK), 198,
+	      "[ERROR:198] full notify queue did not return EAGAIN");
+	CHECK(recv(receive_fd, buf, sizeof(buf), MSG_DONTWAIT) == 4, 199,
+	      "[ERROR:199] failed draining notify receive queue");
+	CHECK(systemd_notify_ready() == 0, 200,
+	      "[ERROR:200] READY retry failed after queue drain");
+
+	unsetenv("NOTIFY_SOCKET");
+	for (i = 0; i < fill_fd_count; i++)
+		close(fill_fds[i]);
+	close(receive_fd);
+#endif
 }
 
 /*
@@ -1401,6 +1476,7 @@ int main(void)
 	test_shutdown_queued_events();
 	test_shutdown_rejects_late_enqueue();
 	test_systemd_notify_runtime_gate();
+	test_systemd_notify_full_queue();
 
 	return 0;
 }

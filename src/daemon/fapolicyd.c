@@ -1300,6 +1300,7 @@ int main(int argc, const char *argv[])
 	struct sigaction sa;
 	struct rlimit limit;
 	nfds_t pfd_count = 2;
+	bool ready_pending = false;
 	int rc;
 
 	setlocale(LC_TIME, "");
@@ -1617,15 +1618,20 @@ int main(int argc, const char *argv[])
 #endif
 
 	msg(LOG_INFO, "Starting to listen for events");
-	if (systemd_notify_ready())
-		msg(LOG_WARNING, "Cannot notify systemd that startup is complete");
+	if (systemd_notify_ready()) {
+		if (errno == EAGAIN || errno == EWOULDBLOCK)
+			ready_pending = true;
+		else
+			msg(LOG_WARNING,
+			    "Cannot notify systemd that startup is complete");
+	}
 	while (!stop) {
 		if (hup) {
 			hup = false;
 			msg(LOG_DEBUG, "Got SIGHUP");
 			maybe_start_reconfigure_thread();
 		}
-		rc = poll(pfd, pfd_count, -1);
+		rc = poll(pfd, pfd_count, ready_pending ? 250 : -1);
 
 #ifdef DEBUG
 		msg(LOG_DEBUG, "Main poll interrupted");
@@ -1662,6 +1668,17 @@ int main(int argc, const char *argv[])
 			sigaction(SIGTERM, &sa, NULL);
 			sigaction(SIGINT, &sa, NULL);
 #endif
+		}
+		/* Retry only after pending permission events have been answered. */
+		if (ready_pending) {
+			rc = systemd_notify_ready();
+			if (rc == 0)
+				ready_pending = false;
+			else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+				ready_pending = false;
+				msg(LOG_WARNING,
+				    "Cannot notify systemd that startup is complete");
+			}
 		}
 	}
 	msg(LOG_INFO, "shutting down...");

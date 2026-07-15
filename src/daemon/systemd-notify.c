@@ -110,7 +110,7 @@ static int notify_send(const char *state)
 	fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 	if (fd < 0)
 		return -1;
-	if (sendto(fd, state, strlen(state), MSG_NOSIGNAL,
+	if (sendto(fd, state, strlen(state), MSG_NOSIGNAL | MSG_DONTWAIT,
 		   (const struct sockaddr *)&addr, addr_len) < 0) {
 		saved_errno = errno;
 		close(fd);
