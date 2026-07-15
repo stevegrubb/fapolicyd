@@ -1645,11 +1645,30 @@ int main(int argc, const char *argv[])
 			if (errno == EINTR)
 				continue;
 			else {
+				int poll_errno = errno;
+
 				stop = true;
+		/*
+		 * The main loop is the only reader of the fanotify
+		 * permission group. The update thread can open watched
+		 * files during a trust reload; those same-process opens are
+		 * allowed only after handle_events() reads their permission
+		 * events. Once poll fails, joining that thread while the
+		 * group is still live can therefore wait forever.
+		 *
+		 * Close the group before any shutdown work that may wait.
+		 * Closing it removes the marks and allows all outstanding
+		 * permission events. Unmarking alone is insufficient because
+		 * an event already queued still needs a reply or a group
+		 * close. nudge_queue() only wakes decision workers, while
+		 * close_database() joins the update thread, so neither call
+		 * may precede this emergency close.
+		 */
+				fanotify_close_on_fatal_signal();
 				nudge_queue();
 				close_database();
 				msg(LOG_ERR, "Poll error (%s)\n",
-					strerror(errno));
+					strerror(poll_errno));
 				exit(1);
 			}
 		} else if (rc > 0) {
