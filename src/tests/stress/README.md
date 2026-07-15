@@ -5,6 +5,10 @@ fanotify decision traffic against a running `fapolicyd` daemon. It is intended
 for development, QE, sizing, and regression work. It is not installed by
 `make install`.
 
+The harness exercises the currently running daemon. It does not start or
+select the daemon executable. By default, daemon reports are collected with
+`fapolicyd-cli` from the same build tree as the stress helper.
+
 The helper creates configurable process trees and runs workloads that exercise
 process startup tracking, subject cache collisions, object cache churn,
 interpreter handling, no-shebang script handling, file opens, execs, and large
@@ -300,8 +304,12 @@ At least one of `--iterations` or `--seconds` must be nonzero.
 
 ## Daemon Report Controls
 
-By default, the harness tries to find `fapolicyd-cli` and capture daemon
-status before and after the workload.
+By default, the harness uses exactly
+`$(abs_top_builddir)/src/fapolicyd-cli` and captures daemon status before and
+after the workload. Invocation does not depend on the current working
+directory. The harness does not search `PATH`, the current working directory,
+environment variables, or system installation directories for another
+client.
 
 - `--status`: Capture daemon status. This is the default.
 
@@ -312,8 +320,8 @@ status before and after the workload.
   workload and stop it after the workload. This requires root or equivalent
   privilege and active `timing_collection=manual`.
 
-- `--cli PATH`: Explicit `fapolicyd-cli` path. If omitted, the harness
-  searches relative to itself, then common system paths.
+- `--cli PATH`: Explicitly use a different `fapolicyd-cli`. If omitted, the
+  harness uses only the client in the build tree at the path above.
 
 - `-v`, `--verbose`: Print helper command failures, such as failed status or
   timing captures.
@@ -454,7 +462,8 @@ Daemon status: not observed
 then it did not successfully collect both before and after status reports.
 Common causes are:
 
-- `fapolicyd-cli` was not found.
+- `fapolicyd-cli` was not available at its expected build-tree path or at the
+  path supplied with `--cli`.
 - `fapolicyd` was not running.
 - The user could not signal the daemon or read the report.
 - The daemon timed out while writing the report.
@@ -499,7 +508,8 @@ Decision timing: not observed
 
 then no timing summary was parsed. Common causes are:
 
-- `fapolicyd-cli` was not found.
+- `fapolicyd-cli` was not available at its expected build-tree path or at the
+  path supplied with `--cli`.
 - The daemon was not running.
 - The daemon did not write `/run/fapolicyd/fapolicyd.timing`.
 - The timing report format did not contain the fields parsed by the harness.

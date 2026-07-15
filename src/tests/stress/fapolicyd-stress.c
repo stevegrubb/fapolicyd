@@ -45,6 +45,9 @@
 #ifndef STRESS_SCRIPT_DIR
 #define STRESS_SCRIPT_DIR "scripts"
 #endif
+#ifndef STRESS_CLI_PATH
+#error "STRESS_CLI_PATH must be set by the build system"
+#endif
 
 enum workload_type {
 	WORKLOAD_EXEC_OPEN,
@@ -1568,7 +1571,7 @@ static int run_capture(const char *path, char *const argv[],
 		dup2(pipefd[1], STDOUT_FILENO);
 		dup2(pipefd[1], STDERR_FILENO);
 		close(pipefd[1]);
-		execvp(path, argv);
+		execv(path, argv);
 		_exit(127);
 	}
 
@@ -1623,74 +1626,21 @@ static bool file_executable(const char *path)
 }
 
 /*
- * find_cli_from_exe - locate fapolicyd-cli relative to this helper.
- * @dst: destination path buffer.
- * Returns 0 when an executable candidate is found, 1 otherwise.
- */
-static int find_cli_from_exe(char *dst)
-{
-	char exe[PATH_MAX];
-	char *slash;
-	ssize_t len;
-
-	len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-	if (len < 0)
-		return 1;
-	exe[len] = 0;
-	slash = strrchr(exe, '/');
-	if (slash == NULL)
-		return 1;
-	*slash = 0;
-	if (snprintf(dst, PATH_MAX, "%s/../../fapolicyd-cli", exe) >=
-			PATH_MAX)
-		return 1;
-	return file_executable(dst) ? 0 : 1;
-}
-
-/*
- * find_cli - locate fapolicyd-cli for report collection.
+ * find_cli - select the configured fapolicyd-cli for report collection.
  * @opts: run options.
  * @dst: destination path buffer.
- * Returns 0 when an executable candidate is found, 1 otherwise.
+ * Returns 0 when the configured path is executable, 1 otherwise.
  */
 static int find_cli(const struct stress_options *opts, char *dst)
 {
-	const char *env = getenv("FAPOLICYD_CLI");
-	static const char * const candidates[] = {
-		"src/fapolicyd-cli",
-		"./fapolicyd-cli",
-		"../../fapolicyd-cli",
-		"/usr/sbin/fapolicyd-cli",
-		"/sbin/fapolicyd-cli",
-		"/usr/bin/fapolicyd-cli",
-		"/bin/fapolicyd-cli",
-		NULL
-	};
-	unsigned int idx;
+	const char *path = opts->cli_path ? opts->cli_path : STRESS_CLI_PATH;
 
-	if (opts->cli_path) {
-		if (!file_executable(opts->cli_path))
-			return 1;
-		snprintf(dst, PATH_MAX, "%s", opts->cli_path);
-		return 0;
-	}
+	if (!file_executable(path))
+		return 1;
+	if (snprintf(dst, PATH_MAX, "%s", path) >= PATH_MAX)
+		return 1;
 
-	if (env && file_executable(env)) {
-		snprintf(dst, PATH_MAX, "%s", env);
-		return 0;
-	}
-
-	if (find_cli_from_exe(dst) == 0)
-		return 0;
-
-	for (idx = 0; candidates[idx]; idx++) {
-		if (file_executable(candidates[idx])) {
-			snprintf(dst, PATH_MAX, "%s", candidates[idx]);
-			return 0;
-		}
-	}
-
-	return 1;
+	return 0;
 }
 
 /*
@@ -2433,6 +2383,7 @@ int main(int argc, char **argv)
 	unsigned long long start_ns;
 	unsigned long long end_ns;
 	char cli_path[PATH_MAX] = "";
+	const char *expected_cli;
 	int cli_available = 0;
 	int arg_rc;
 	int rc = 0;
@@ -2481,9 +2432,12 @@ int main(int argc, char **argv)
 	memset(&after_status, 0, sizeof(after_status));
 	memset(&timing, 0, sizeof(timing));
 
+	expected_cli = opts.cli_path ? opts.cli_path : STRESS_CLI_PATH;
 	cli_available = find_cli(&opts, cli_path) == 0;
 	if (opts.collect_timing && !cli_available) {
-		fprintf(stderr, "--timing requires fapolicyd-cli\n");
+		fprintf(stderr,
+			"--timing requires fapolicyd-cli at expected path %s\n",
+			expected_cli);
 		rc = 1;
 		goto out;
 	}
@@ -2500,7 +2454,9 @@ int main(int argc, char **argv)
 		rc = 1;
 		goto out;
 	} else if (opts.collect_status && !cli_available)
-		fprintf(stderr, "fapolicyd-cli not found; daemon metrics disabled\n");
+		fprintf(stderr,
+			"fapolicyd-cli is not available at expected path %s; "
+			"daemon metrics disabled\n", expected_cli);
 
 	if (install_signal_handlers(shared)) {
 		fprintf(stderr, "failed to install signal handlers\n");

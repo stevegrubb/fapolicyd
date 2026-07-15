@@ -14,7 +14,8 @@ CLEANFILES = fapolicyd-stress
 
 AM_CPPFLAGS = -I${top_builddir} \
 	-I${top_srcdir}/src/library \
-	-DSTRESS_SCRIPT_DIR=\"$(abs_srcdir)/scripts\"
+	-DSTRESS_SCRIPT_DIR=\"$(abs_srcdir)/scripts\" \
+	-DSTRESS_CLI_PATH=\"$(abs_top_builddir)/src/fapolicyd-cli\"
 AM_CFLAGS = -std=gnu11 -fPIE -DPIE -g -W -Wall -Wshadow -Wundef \
 	-Wno-unused-result -Wno-unused-parameter -D_GNU_SOURCE
 
