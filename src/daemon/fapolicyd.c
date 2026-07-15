@@ -43,9 +43,6 @@
 #include <limits.h>        /* PATH_MAX */
 #include <locale.h>
 #include <pthread.h>
-#ifndef HAVE_GETTID
-#include <sys/syscall.h>
-#endif
 #ifdef HAVE_MALLINFO2
 #include <malloc.h>
 #endif
@@ -112,13 +109,6 @@ static atomic_bool reconfig_running = false;
 static atomic_bool mounts_running = false;
 
 static __noreturn void usage(void);
-
-#ifndef HAVE_GETTID
-pid_t gettid(void)
-{
-	return syscall(SYS_gettid);
-}
-#endif
 
 /*
  * install_syscall_filter - install daemon seccomp restrictions.
@@ -380,22 +370,37 @@ static void term_handler(int sig __attribute__((unused)))
 }
 
 
+/*
+ * coredump_handler - release fanotify waiters before fatal termination.
+ * @sig: fatal signal that selected this handler.
+ *
+ * Hardware faults are delivered to the thread that caused them, and abort()
+ * raises SIGABRT in the calling thread. They cannot safely be redirected to
+ * the main thread: the interrupted thread may hold allocator or daemon locks,
+ * and blocking synchronous SIGSEGV/SIGBUS/SIGILL/SIGFPE is undefined.
+ *
+ * Every thread therefore executes this same minimal handler. Closing the last
+ * permission-group descriptor removes its marks and allows outstanding
+ * permission events, preventing unrelated processes from remaining blocked
+ * while the daemon terminates or writes a core.
+ *
+ * No allocation, logging, locking, formatted output, or shared data-structure
+ * traversal is permitted here. After closing the group, restore the default
+ * disposition and raise the signal in this thread so normal fatal-signal and
+ * core-dump processing occurs. _exit() is only a fallback if that fails.
+ *
+ * Returns only after successfully queuing @sig for default handling.
+ */
 static void coredump_handler(int sig)
 {
-	if (getpid() == gettid()) {
-		unmark_fanotify(m);
-		unlink_fifo();
-		signal(sig, SIG_DFL);
-		kill(getpid(), sig);
-	} else {
-		/*
-		 * Fatal signals are usually delivered to the thread generating
-		 * them, if this is not main thread, raised the signal again to
-		 * handle it there, then wait forever to die.
-		 */
-		kill(getpid(), sig);
-		for (;;) pause();
-	}
+	struct sigaction action = {
+		.sa_handler = SIG_DFL,
+	};
+
+	fanotify_close_on_fatal_signal();
+	sigemptyset(&action.sa_mask);
+	if (sigaction(sig, &action, NULL) || raise(sig))
+		_exit(128 + sig);
 }
 
 

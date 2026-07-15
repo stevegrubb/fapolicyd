@@ -283,6 +283,39 @@ static void test_nonblocking_fanotify_reads(void)
 }
 
 /*
+ * test_fatal_signal_fanotify_close - verify emergency descriptor ownership.
+ *
+ * The first close must release the registered descriptor. A later emergency
+ * close must not close an unrelated descriptor that reused the same integer.
+ * Returns nothing. Exits on test failure.
+ */
+static void test_fatal_signal_fanotify_close(void)
+{
+	int pipe_fds[2];
+	int group_fd;
+
+	CHECK(pipe(pipe_fds) == 0, 193,
+	      "[ERROR:193] emergency close pipe setup failed");
+	group_fd = pipe_fds[0];
+	test_notify_set_fanotify_fd(group_fd);
+	fanotify_close_on_fatal_signal();
+
+	errno = 0;
+	CHECK(fcntl(group_fd, F_GETFD) == -1 && errno == EBADF, 194,
+	      "[ERROR:194] emergency close retained fanotify descriptor");
+	CHECK(dup2(pipe_fds[1], group_fd) == group_fd, 195,
+	      "[ERROR:195] failed reusing closed fanotify descriptor");
+
+	fanotify_close_on_fatal_signal();
+	CHECK(fcntl(group_fd, F_GETFD) >= 0, 196,
+	      "[ERROR:196] repeated emergency close closed reused descriptor");
+
+	test_notify_set_fanotify_fd(-1);
+	close(group_fd);
+	close(pipe_fds[1]);
+}
+
+/*
  * test_mount_list_reconcile - verify a complete mount snapshot is merged.
  *
  * The active list must retain existing marks, flag disappeared mounts for
@@ -1213,6 +1246,7 @@ int main(void)
 	test_interval_report_deadline();
 	test_interval_report_disable_closes_timer();
 	test_nonblocking_fanotify_reads();
+	test_fatal_signal_fanotify_close();
 	test_mount_list_reconcile();
 
 	before = getKernelQueueOverflow();

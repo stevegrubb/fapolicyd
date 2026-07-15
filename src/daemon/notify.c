@@ -87,7 +87,9 @@ extern conf_t config;
 
 // Local variables
 static pid_t our_pid;
-static int fd = -1;
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2,
+	       "fatal signal cleanup requires lock-free atomic int");
+static atomic_int fd = ATOMIC_VAR_INIT(-1);
 static uint64_t mask;
 static unsigned int mark_flag;
 static struct message_rate_limit kernel_queue_overflow_log =
@@ -245,7 +247,7 @@ int init_fanotify(const conf_t *conf, mlist *m)
 	}
 
 	if (reply_event_init(fd)) {
-		close(fd);
+		fanotify_close_on_fatal_signal();
 		decision_worker_pool_discard();
 		exit(1);
 	}
@@ -255,7 +257,7 @@ int init_fanotify(const conf_t *conf, mlist *m)
 	runtime.report_interval = conf->report_interval;
 	rc = decision_worker_pool_start(&runtime);
 	if (rc) {
-		close(fd);
+		fanotify_close_on_fatal_signal();
 		decision_worker_pool_discard();
 		exit(1);
 	}
@@ -315,6 +317,25 @@ retry_mark:
 
 	fanotify_fs_error_init(m);
 	return fd;
+}
+
+/*
+ * fanotify_close_on_fatal_signal - release the permission fanotify group.
+ *
+ * The lock-free exchange gives ownership of the descriptor to at most one
+ * concurrent fatal signal handler. close() is async-signal-safe, releases the
+ * group's marks, and allows its outstanding permission events. This function
+ * must not grow logging, allocation, locking, or other cleanup dependencies.
+ *
+ * Returns nothing.
+ */
+void fanotify_close_on_fatal_signal(void)
+{
+	int group_fd = atomic_exchange_explicit(&fd, -1,
+						memory_order_relaxed);
+
+	if (group_fd >= 0)
+		(void)close(group_fd);
 }
 
 void fanotify_update(mlist *m)
@@ -400,7 +421,7 @@ void shutdown_fanotify(mlist *m)
 	decision_worker_pool_shutdown();
 	decision_worker_pool_close();
 	fanotify_fs_error_close();
-	close(fd);
+	fanotify_close_on_fatal_signal();
 
 	// Report results
 	msg(LOG_DEBUG, "Allowed accesses: %lu", getAllowed());
@@ -608,6 +629,6 @@ void handle_events(void)
  */
 void test_notify_set_fanotify_fd(int test_fd)
 {
-	fd = test_fd;
+	atomic_store_explicit(&fd, test_fd, memory_order_relaxed);
 }
 #endif
