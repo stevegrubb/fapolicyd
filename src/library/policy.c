@@ -1340,6 +1340,15 @@ static int test_info_api(int fd)
 #endif
 
 /*
+ * The daemon has one fanotify permission group. Keep its original descriptor
+ * number after shutdown so workers holding that number can recognize a retired
+ * group instead of writing to an unrelated file that reused the descriptor.
+ */
+static pthread_rwlock_t response_fd_lock = PTHREAD_RWLOCK_INITIALIZER;
+static int managed_response_fd = -1;
+static bool managed_response_closed = true;
+
+/*
  * reply_event_init - pre-probe extended fanotify response support.
  * @fd: fanotify listener fd used for permission responses.
  * Returns 0 on success or 1 when initialization cannot be attempted.
@@ -1357,10 +1366,39 @@ int reply_event_init(int fd)
 	}
 
 	response_info_supported = test_info_api(fd);
-#else
-	(void)fd;
 #endif
+	pthread_rwlock_wrlock(&response_fd_lock);
+	managed_response_fd = fd;
+	managed_response_closed = false;
+	pthread_rwlock_unlock(&response_fd_lock);
 	return 0;
+}
+
+/*
+ * reply_event_close_group - retire and close the permission fanotify group.
+ * @group_fd: atomic descriptor owned by notify.c.
+ *
+ * Normal shutdown closes the group before joining threads because a worker
+ * can be blocked in a watched open that only group closure can release after
+ * the main reader exits. Serialize that close with response writes and retain
+ * the original descriptor number so late worker cleanup cannot write to a
+ * reused descriptor. This function is not async-signal-safe.
+ *
+ * Returns nothing.
+ */
+void reply_event_close_group(atomic_int *group_fd)
+{
+	int fd;
+
+	if (group_fd == NULL)
+		return;
+
+	pthread_rwlock_wrlock(&response_fd_lock);
+	managed_response_closed = true;
+	fd = atomic_exchange_explicit(group_fd, -1, memory_order_relaxed);
+	if (fd >= 0)
+		(void)close(fd);
+	pthread_rwlock_unlock(&response_fd_lock);
 }
 
 /*
@@ -1445,7 +1483,14 @@ out:
 void reply_event(int fd, const struct fanotify_event_metadata *metadata,
 		unsigned reply, event_t *e)
 {
-	reply_event_write(fd, metadata, reply, e);
+	int managed = managed_response_fd >= 0 && fd == managed_response_fd;
+
+	if (managed)
+		pthread_rwlock_rdlock(&response_fd_lock);
+	if (!managed || !managed_response_closed)
+		reply_event_write(fd, metadata, reply, e);
+	if (managed)
+		pthread_rwlock_unlock(&response_fd_lock);
 	if (metadata->fd >= 0)
 		close(metadata->fd);
 }

@@ -338,6 +338,22 @@ void fanotify_close_on_fatal_signal(void)
 		(void)close(group_fd);
 }
 
+/*
+ * fanotify_close_for_shutdown - release permission waiters before thread waits.
+ *
+ * FAN_MARK_FLUSH prevents future events but does not answer permission events
+ * already queued. Once the main reader exits, a daemon worker or helper can be
+ * blocked in its own watched open, so no join or helper wait may precede this
+ * synchronized group close. reply_event_close_group() also prevents workers
+ * from writing through the retired descriptor after the kernel reuses it.
+ *
+ * Returns nothing.
+ */
+void fanotify_close_for_shutdown(void)
+{
+	reply_event_close_group(&fd);
+}
+
 void fanotify_update(mlist *m)
 {
 	// Make sure fanotify_init has run
@@ -393,35 +409,15 @@ void fanotify_update(mlist *m)
 	m->cur = m->head;  // Leave cur pointing to something valid
 }
 
-void unmark_fanotify(mlist *m)
+/*
+ * shutdown_fanotify - join and release workers after permission group close.
+ * Returns nothing.
+ */
+void shutdown_fanotify(void)
 {
-	if (m == NULL)
-		return;
-
-	const char *path = mlist_first(m);
-
-	// Stop the flow of events
-	while (path) {
-		char *escaped_path = NULL;
-		const char *safe_path = escape_path_for_log(path, &escaped_path);
-
-		if (fanotify_mark(fd, FAN_MARK_FLUSH | mark_flag,
-				  0, -1, path) == -1)
-			msg(LOG_ERR, "Failed flushing path %s  (%s)",
-				safe_path, strerror(errno));
-		fanotify_fs_error_unmark(path);
-		free(escaped_path);
-		path = mlist_next(m);
-	}
-}
-
-void shutdown_fanotify(mlist *m)
-{
-	unmark_fanotify(m);
 	decision_worker_pool_shutdown();
 	decision_worker_pool_close();
 	fanotify_fs_error_close();
-	fanotify_close_on_fatal_signal();
 
 	// Report results
 	msg(LOG_DEBUG, "Allowed accesses: %lu", getAllowed());

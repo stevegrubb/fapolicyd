@@ -371,8 +371,8 @@ static void term_handler(int sig __attribute__((unused)))
 	 * Reconfiguration checks stop between reload phases. This best-effort
 	 * guard makes a deliberately sequenced SIGHUP/SIGTERM from a signal-
 	 * authorized process abandon later work, but cannot close a
-	 * permission-open race after a check. A complete fix must drain or
-	 * close fanotify before helper waits.
+	 * permission-open race after a check. The normal shutdown path therefore
+	 * closes fanotify before it waits for helpers.
 	 */
 }
 
@@ -1678,9 +1678,9 @@ int main(int argc, const char *argv[])
 		 * an event already queued still needs a reply or a group
 		 * close. nudge_queue() only wakes decision workers, while
 		 * close_database() joins the update thread, so neither call
-		 * may precede this emergency close.
+		 * may precede this early close.
 		 */
-				fanotify_close_on_fatal_signal();
+				fanotify_close_for_shutdown();
 				nudge_queue();
 				close_database();
 				msg(LOG_ERR, "Poll error (%s)\n",
@@ -1722,11 +1722,18 @@ int main(int argc, const char *argv[])
 		}
 	}
 	msg(LOG_INFO, "shutting down...");
+	/*
+	 * The main loop was the only reader that allowed same-process fanotify
+	 * events. Close the group before waiting for any worker or helper that
+	 * may already be blocked in a watched open. Moving this close after a
+	 * wait can make shutdown deadlock with the close needed to release it.
+	 */
+	fanotify_close_for_shutdown();
 	if (systemd_notify_stopping())
 		msg(LOG_WARNING, "Cannot notify systemd that shutdown started");
 	wait_for_reconfigure_thread();
 	wait_for_mounts_thread();
-	shutdown_fanotify(m);
+	shutdown_fanotify();
 	close(pfd[0].fd);
 	file_close();
 	close_database();

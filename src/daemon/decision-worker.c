@@ -617,7 +617,7 @@ static void save_last_queue_metrics(void)
 }
 
 /*
- * decision_worker_pool_shutdown - stop worker threads after fanotify unmark.
+ * decision_worker_pool_shutdown - stop workers after fanotify group close.
  * Returns nothing.
  */
 void decision_worker_pool_shutdown(void)

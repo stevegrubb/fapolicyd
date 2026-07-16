@@ -31,10 +31,10 @@
 #include "mounts.h"
 
 int init_fanotify(const conf_t *config, mlist *m);
+void fanotify_close_for_shutdown(void);
 void fanotify_close_on_fatal_signal(void);
 void fanotify_update(mlist *m);
-void unmark_fanotify(mlist *m);
-void shutdown_fanotify(mlist *m);
+void shutdown_fanotify(void);
 void fanotify_queue_report(FILE *f);
 void fanotify_queue_report_reset(FILE *f, int reset);
 void fanotify_queue_health_report(FILE *f);

@@ -316,6 +316,70 @@ static void test_fatal_signal_fanotify_close(void)
 }
 
 /*
+ * test_shutdown_fanotify_close - keep late replies off a reused group fd.
+ *
+ * Normal shutdown must close the group before worker joins to release watched
+ * self-opens. A late worker still carries the original descriptor number, so
+ * prove its cleanup closes the event fd without writing to a pipe that reused
+ * the retired group descriptor.
+ *
+ * Returns nothing. Exits on test failure.
+ */
+static void test_shutdown_fanotify_close(void)
+{
+	struct fanotify_event_metadata metadata = {
+		.event_len = sizeof(metadata),
+		.vers = FANOTIFY_METADATA_VERSION,
+		.mask = FAN_OPEN_PERM,
+		.pid = 1234,
+	};
+	char byte;
+	int event[2], group[2], reused[2];
+	int flags, group_fd;
+
+	CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, group) == 0, 210,
+	      "[ERROR:210] shutdown group socket setup failed");
+	CHECK(pipe(reused) == 0, 211,
+	      "[ERROR:211] shutdown reused pipe setup failed");
+	CHECK(pipe(event) == 0, 212,
+	      "[ERROR:212] shutdown event pipe setup failed");
+	group_fd = group[0];
+	metadata.fd = event[0];
+
+	CHECK(reply_event_init(group_fd) == 0, 213,
+	      "[ERROR:213] shutdown response registration failed");
+	test_notify_set_fanotify_fd(group_fd);
+	fanotify_close_for_shutdown();
+	errno = 0;
+	CHECK(fcntl(group_fd, F_GETFD) == -1 && errno == EBADF, 214,
+	      "[ERROR:214] shutdown retained fanotify descriptor");
+
+	CHECK(dup2(reused[1], group_fd) == group_fd, 215,
+	      "[ERROR:215] failed reusing shutdown fanotify descriptor");
+	flags = fcntl(reused[0], F_GETFL);
+	CHECK(flags >= 0 && fcntl(reused[0], F_SETFL, flags | O_NONBLOCK) == 0,
+	      216, "[ERROR:216] failed setting reused pipe nonblocking");
+	reply_event(group_fd, &metadata, FAN_ALLOW, NULL);
+	errno = 0;
+	CHECK(read(reused[0], &byte, sizeof(byte)) == -1 && errno == EAGAIN,
+	      217, "[ERROR:217] late reply wrote to reused descriptor");
+	errno = 0;
+	CHECK(close(event[0]) == -1 && errno == EBADF, 218,
+	      "[ERROR:218] late reply retained event descriptor");
+
+	fanotify_close_for_shutdown();
+	CHECK(fcntl(group_fd, F_GETFD) >= 0, 219,
+	      "[ERROR:219] repeated shutdown closed reused descriptor");
+
+	test_notify_set_fanotify_fd(-1);
+	close(group_fd);
+	close(group[1]);
+	close(reused[0]);
+	close(reused[1]);
+	close(event[1]);
+}
+
+/*
  * test_mount_list_reconcile - verify a complete mount snapshot is merged.
  *
  * The active list must retain existing marks, flag disappeared mounts for
@@ -1294,6 +1358,7 @@ int main(void)
 	test_interval_report_defer_deadline();
 	test_interval_report_disable_closes_timer();
 	test_nonblocking_fanotify_reads();
+	test_shutdown_fanotify_close();
 	test_fatal_signal_fanotify_close();
 	test_mount_list_reconcile();
 
