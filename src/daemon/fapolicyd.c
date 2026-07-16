@@ -363,9 +363,16 @@ static void term_handler(int sig __attribute__((unused)))
 {
 	stop = true;
 	/*
-	 * Let the dispatcher finish its current nonblocking batch before workers
-	 * are woken for shutdown. Otherwise a worker can drain and exit while a
-	 * signal-interrupted handle_events() resumes and enqueues a later record.
+	 * Let the dispatcher finish its current nonblocking batch before
+	 * workers are woken for shutdown. Otherwise a worker can drain and
+	 * exit while a signal-interrupted handle_events() resumes and
+	 * enqueues a later record.
+	 *
+	 * Reconfiguration checks stop between reload phases. This best-effort
+	 * guard makes a deliberately sequenced SIGHUP/SIGTERM from a signal-
+	 * authorized process abandon later work, but cannot close a
+	 * permission-open race after a check. A complete fix must drain or
+	 * close fanotify before helper waits.
 	 */
 }
 
@@ -486,7 +493,7 @@ static int reload_configuration(void)
 
 	config.rpm_sha256_only = new_config.rpm_sha256_only;
 
-	if (new_config.trust) {
+	if (new_config.trust && !stop) {
 		lock_update_thread();
 		if (!config.trust || strcmp(new_config.trust, config.trust) != 0) {
 			char *new_trust = strdup(new_config.trust);
@@ -519,15 +526,24 @@ static int reload_configuration(void)
 
 static void reconfigure(void)
 {
+	if (stop)
+		return;
+
 	if (reload_configuration())
 		msg(LOG_WARNING,
 			"Continuing with previous configuration settings");
+
+	if (stop)
+		return;
 
 	filter_destroy();
 	if (filter_init())
 		msg(LOG_ERR, "Failed initializing filter configuration");
 	else if (filter_load_file(NULL))
 		msg(LOG_ERR, "Failed reloading filter configuration");
+
+	if (stop)
+		return;
 
 	set_reload_rules();
 	set_reload_trust_database();
