@@ -5,5 +5,16 @@
 # nfsd's comm value prevents a user-space process named nfsd from matching.
 # This deliberately permits only open events.  NFS export rules and file
 # permissions remain responsible for authorizing the remote client.
+#
+# WARNING: When exported content resides on an already watched local
+# filesystem, this server-side rule does not require adding nfs or nfs4 to
+# watch_fs.  If exported content instead resides on an NFS client mount,
+# fapolicyd can evaluate access to it only when that filesystem type is
+# watched.  The default watch list intentionally excludes network filesystems.
+# The kernel must resolve a mount path while adding its fanotify mark, and
+# fanotify_mark() has no nonblocking mode.  If an NFS server is unreachable
+# while fapolicyd marks its client mount, a series of events can lead to a
+# hang waiting for permission decisions.  Only watch NFS client mounts when
+# network and server availability are assured.
 
 allow perm=open ppid=2 comm=nfsd : all
