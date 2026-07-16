@@ -33,11 +33,11 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include <uthash.h>
 
+#include "backend-manager.h"
 #include "conf.h"
 #include "fapolicyd-backend.h"
 #include "filter.h"
@@ -65,6 +65,7 @@ backend deb_backend = {
 
 #define BUFFER_SIZE 4096
 static const char *deb_loader_path = LIBEXECDIR "/fapolicyd-deb-loader";
+static int deb_loader_timeout_ms = BACKEND_LOADER_TIMEOUT_MS;
 
 // ================================================================
 // These functions are copied from dpkg source v1.21.1
@@ -310,20 +311,30 @@ static int deb_load_list(const conf_t *conf)
 	char *custom_env[] = { "FAPO_SOCK_FD=3", NULL };
 
 	pid_t pid = -1;
-	int status = posix_spawn(&pid, deb_loader_path,
+	int spawn_rc = posix_spawn(&pid, deb_loader_path,
 				 &actions, NULL, argv, custom_env);
 	close(sv[1]);  // Parent doesn't write
 
-	if (status == 0) {
+	if (spawn_rc == 0) {
 		msg(LOG_DEBUG, "fapolicyd-deb-loader spawned with pid: %d",
 		    pid);
+
+		if (backend_wait_for_loader(sv[0], deb_loader_timeout_ms)) {
+			char err_buff[BUFFER_SIZE];
+
+			msg(LOG_ERR, "deb loader snapshot wait failed (%s)",
+			    strerror_r(errno, err_buff, BUFFER_SIZE));
+			close(sv[0]);
+			posix_spawn_file_actions_destroy(&actions);
+			return 1;
+		}
 
 		struct msghdr  _msg  = {0};
 		struct iovec   iov = { .iov_base = (char[1]){0}, .iov_len = 1 };
 		union {
 			struct cmsghdr align;
 			char buf[CMSG_SPACE(sizeof(int))];
-		} cmsgbuf;
+		} cmsgbuf = {0};
 
 		_msg.msg_iov    = &iov;
 		_msg.msg_iovlen = 1;
@@ -332,14 +343,13 @@ static int deb_load_list(const conf_t *conf)
 
 		ssize_t rc;
 		do {
-			rc = recvmsg(sv[0], &_msg, 0);
+			rc = recvmsg(sv[0], &_msg, MSG_DONTWAIT);
 		} while (rc < 0 && errno == EINTR);
 		if (rc < 0) {
 			char err_buff[BUFFER_SIZE];
 			msg(LOG_ERR, "recvmsg failed (%s)",
 			    strerror_r(errno, err_buff, BUFFER_SIZE));
 			close(sv[0]);
-			while (waitpid(pid, &status, 0) < 0 && errno == EINTR);
 			posix_spawn_file_actions_destroy(&actions);
 			return 1;
 		}
@@ -348,7 +358,6 @@ static int deb_load_list(const conf_t *conf)
 		struct cmsghdr *c = CMSG_FIRSTHDR(&_msg);
 		if (!c || c->cmsg_type != SCM_RIGHTS) {
 			msg(LOG_ERR, "missing fd");
-			while (waitpid(pid, &status, 0) < 0 && errno == EINTR);
 			posix_spawn_file_actions_destroy(&actions);
 			return 1;
 		}
@@ -368,46 +377,36 @@ static int deb_load_list(const conf_t *conf)
 
 		// Pass the memfd to the backend representation.
 		deb_backend.memfd = memfd;
-
-		while (waitpid(pid, &status, 0) < 0 && errno == EINTR);
 	} else {
 		close(sv[0]);
-		msg(LOG_ERR, "posix_spawn failed: %s\n", strerror(status));
+		msg(LOG_ERR, "posix_spawn failed: %s\n", strerror(spawn_rc));
 	}
 
 	posix_spawn_file_actions_destroy(&actions);
-
-	int exit_rc = status;
-	if (status) {
-		if (WIFEXITED(status))
-			exit_rc = WEXITSTATUS(status);
-		else if (WIFSIGNALED(status))
-			exit_rc = 128 + WTERMSIG(status);
-	}
-
-	if (exit_rc)
-		msg(LOG_ERR, "fapolicyd-deb-loader exited with rc=%d",
-		    exit_rc);
-
-	return exit_rc;
+	return spawn_rc;
 }
 
 /*
  * deb_backend_load_from_path_for_tests - exercise deb loader IPC errors.
  * @conf: test configuration.
  * @loader_path: helper executable path to spawn.
+ * @timeout_ms: maximum snapshot wait used by the test.
  *
  * Returns the deb backend load result without terminating the caller.
  */
 int deb_backend_load_from_path_for_tests(const conf_t *conf,
-					 const char *loader_path)
+					 const char *loader_path,
+					 int timeout_ms)
 {
 	const char *previous_loader_path = deb_loader_path;
+	int previous_timeout_ms = deb_loader_timeout_ms;
 	int rc;
 
 	deb_loader_path = loader_path;
+	deb_loader_timeout_ms = timeout_ms;
 	rc = deb_load_list(conf);
 	deb_loader_path = previous_loader_path;
+	deb_loader_timeout_ms = previous_timeout_ms;
 	return rc;
 }
 

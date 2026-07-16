@@ -64,7 +64,8 @@ int sock_fd = 3; // same number dup2’ed by parent
 
 int main(int argc, char * const argv[])
 {
-
+	/* The daemon ignores SIGCHLD only for its direct package loaders. */
+	signal(SIGCHLD, SIG_DFL);
 	set_message_mode(MSG_SYSLOG, DBG_NO);
 	openlog("fapolicyd-rpm-loader", LOG_PID, LOG_DAEMON);
 
@@ -100,6 +101,13 @@ int main(int argc, char * const argv[])
 		    strerror(errno));
 	lseek(memfd, 0, SEEK_SET);            /* rewind – not strictly needed */
 
+	/*
+	 * Sending the sealed memfd commits success to the daemon. Finish all
+	 * package cleanup first so the daemon never needs to wait for our exit.
+	 */
+	do_rpm_destroy_backend();
+	free_daemon_config(&config);
+
 	// send the FD
 	struct msghdr  _msg = {0};
 	struct iovec   iov = { .iov_base = (char[1]){0}, .iov_len = 1 };
@@ -126,9 +134,5 @@ int main(int argc, char * const argv[])
 
 	close(sock_fd);       // closes the channel; parent gets EOF
 	close(memfd);         // parent has its own refcount
-
-	do_rpm_destroy_backend();
-
-	free_daemon_config(&config);
 	return 0;
 }

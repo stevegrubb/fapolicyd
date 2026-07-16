@@ -24,7 +24,11 @@
 
 #include "config.h"
 #include <ctype.h>
+#include <errno.h>
+#include <poll.h>
+#include <signal.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
@@ -55,6 +59,7 @@ static backend* compiled[] =
 };
 
 static backend_entry* backends = NULL;
+extern atomic_bool stop;
 static int backend_push(const char *name)
 {
 	long index = -1;
@@ -130,8 +135,54 @@ static int backend_create(const char *trust_list)
 }
 
 
+/*
+ * backend_wait_for_loader - wait for a package loader socket event.
+ * @fd: loader socket descriptor.
+ * @timeout_ms: maximum time to wait in milliseconds.
+ *
+ * Returns 0 when the socket is ready and -1 on timeout, shutdown, or error.
+ */
+int backend_wait_for_loader(int fd, int timeout_ms)
+{
+	struct pollfd pfd = { .fd = fd, .events = POLLIN };
+	int remaining = timeout_ms;
+
+	while (!stop && remaining > 0) {
+		int interval = remaining > BACKEND_LOADER_POLL_MS ?
+			BACKEND_LOADER_POLL_MS : remaining;
+		int rc = poll(&pfd, 1, interval);
+
+		if (rc > 0)
+			return 0;
+		if (rc < 0 && errno != EINTR)
+			return -1;
+		remaining -= interval;
+	}
+
+	errno = stop ? ECANCELED : ETIMEDOUT;
+	return -1;
+}
+
+
 int backend_init(const conf_t *conf)
 {
+#if defined(USE_RPM) || defined(USE_DEB)
+	struct sigaction action = { .sa_handler = SIG_IGN };
+
+	/*
+	 * A sealed memfd is a package loader's success commit. Process exit can
+	 * wedge after that commit, while the bounded socket wait handles an
+	 * earlier storage stall. Ignore SIGCHLD so neither path blocks reaping.
+	 * Do not restore waitpid() without bounded child supervision.
+	 */
+	sigemptyset(&action.sa_mask);
+	if (sigaction(SIGCHLD, &action, NULL)) {
+		msg(LOG_ERR, "Cannot configure package loader child reaping (%s)",
+		    strerror(errno));
+		return 1;
+	}
+#endif
+
 	if (backend_create(conf->trust))
 		return 1;
 
@@ -176,4 +227,3 @@ backend_entry* backend_get_first(void)
 {
 	return backends;
 }
-

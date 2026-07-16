@@ -137,13 +137,13 @@ extern backend file_backend;
 #ifdef USE_RPM
 extern backend rpm_backend;
 int rpm_backend_load_from_path_for_tests(const conf_t *conf,
-	const char *loader_path) __nonnull ((1, 2));
+		const char *loader_path, int timeout_ms) __nonnull ((1, 2));
 #endif
 
 #ifdef USE_DEB
 extern backend deb_backend;
 int deb_backend_load_from_path_for_tests(const conf_t *conf,
-	const char *loader_path) __nonnull ((1, 2));
+		const char *loader_path, int timeout_ms) __nonnull ((1, 2));
 #endif
 
 #endif

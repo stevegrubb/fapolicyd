@@ -4,19 +4,58 @@
 
 #include "config.h"
 
+#include <errno.h>
 #include <error.h>
+#include <limits.h>
+#include <poll.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
+#include "backend-manager.h"
 #include "fapolicyd-backend.h"
 
 extern backend rpm_backend;
+
+#define CHILD_WAIT_MS 2000
+#define LOADER_TEST_TIMEOUT_MS 100
+#define LOADER_TEST_MAX_WAIT_MS 1000
 
 #define CHECK(expr, code, msg) \
 	do { \
 		if (!(expr)) \
 			error(code, 0, "%s", msg); \
 	} while (0)
+
+/*
+ * monotonic_ms - return monotonic milliseconds for timeout validation.
+ * Returns -1 when the monotonic clock is unavailable.
+ */
+static int64_t monotonic_ms(void)
+{
+	struct timespec now;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &now))
+		return -1;
+	return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/*
+ * wait_for_parent_close - act as a loader that never sends a snapshot.
+ * Returns after the parent closes fd 3 or after a test safety timeout.
+ */
+static int wait_for_parent_close(void)
+{
+	struct pollfd pfd = { .fd = 3, .events = POLLIN };
+	int rc;
+
+	do {
+		rc = poll(&pfd, 1, CHILD_WAIT_MS);
+	} while (rc < 0 && errno == EINTR);
+	return rc > 0 ? 0 : 1;
+}
 
 /*
  * true_path - find a harmless helper that exits without sending an fd.
@@ -38,22 +77,49 @@ static const char *true_path(void)
 int main(void)
 {
 	const char *path = true_path();
+	char self_path[PATH_MAX];
 	conf_t cfg;
+	int64_t elapsed;
+	int64_t start;
+	ssize_t len;
 	int rc;
+
+	if (getenv("FAPO_SOCK_FD") != NULL)
+		return wait_for_parent_close();
 
 	if (path == NULL)
 		return 77;
 
 	memset(&cfg, 0, sizeof(cfg));
+	cfg.trust = "rpmdb";
+	CHECK(backend_init(&cfg) == 0, 1, "[ERROR:1] rpmdb init failed");
 	rpm_backend.memfd = -1;
 	rpm_backend.entries = -1;
 
-	rc = rpm_backend_load_from_path_for_tests(&cfg, path);
-	CHECK(rc != 0, 1, "[ERROR:1] rpm IPC failure returned success");
-	CHECK(rpm_backend.memfd == -1, 2,
-	      "[ERROR:2] failed rpm load published a memfd");
-	CHECK(rpm_backend.entries == -1, 3,
-	      "[ERROR:3] failed rpm load published entries");
+	rc = rpm_backend_load_from_path_for_tests(&cfg, path,
+						 LOADER_TEST_MAX_WAIT_MS);
+	CHECK(rc != 0, 2, "[ERROR:2] rpm IPC failure returned success");
+	CHECK(rpm_backend.memfd == -1, 3,
+	      "[ERROR:3] failed rpm load published a memfd");
+	CHECK(rpm_backend.entries == -1, 4,
+	      "[ERROR:4] failed rpm load published entries");
 
+	len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
+	CHECK(len > 0, 5, "[ERROR:5] cannot resolve rpm test executable");
+	self_path[len] = '\0';
+	start = monotonic_ms();
+	CHECK(start >= 0, 6, "[ERROR:6] cannot read monotonic clock");
+	rc = rpm_backend_load_from_path_for_tests(&cfg, self_path,
+						 LOADER_TEST_TIMEOUT_MS);
+	elapsed = monotonic_ms() - start;
+	CHECK(rc != 0, 7, "[ERROR:7] stalled rpm loader returned success");
+	CHECK(elapsed >= 0 && elapsed < LOADER_TEST_MAX_WAIT_MS, 8,
+	      "[ERROR:8] stalled rpm loader wait was not bounded");
+	CHECK(rpm_backend.memfd == -1, 9,
+	      "[ERROR:9] stalled rpm load published a memfd");
+	CHECK(rpm_backend.entries == -1, 10,
+	      "[ERROR:10] stalled rpm load published entries");
+
+	backend_close();
 	return 0;
 }

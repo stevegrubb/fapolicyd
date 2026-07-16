@@ -30,6 +30,9 @@
 #include "conf.h"
 #include "fapolicyd-backend.h"
 
+#define BACKEND_LOADER_TIMEOUT_MS (30 * 60 * 1000)
+#define BACKEND_LOADER_POLL_MS 1000
+
 typedef struct _backend_entry {
 	backend *backend;
 	struct _backend_entry *next;
@@ -38,8 +41,8 @@ typedef struct _backend_entry {
 
 int backend_init(const conf_t *conf);
 int backend_load(const conf_t *conf);
+int backend_wait_for_loader(int fd, int timeout_ms);
 void backend_close(void);
 backend_entry* backend_get_first(void);
 
 #endif
-

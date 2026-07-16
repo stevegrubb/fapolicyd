@@ -23,6 +23,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +53,8 @@ int sock_fd = 3;
 
 int main(int argc, char * const argv[])
 {
+	/* The daemon ignores SIGCHLD only for its direct package loaders. */
+	signal(SIGCHLD, SIG_DFL);
 	set_message_mode(MSG_SYSLOG, DBG_NO);
 	openlog("fapolicyd-deb-loader", LOG_PID, LOG_DAEMON);
 
@@ -84,6 +87,12 @@ int main(int argc, char * const argv[])
 		    strerror(errno));
 	lseek(memfd, 0, SEEK_SET);
 
+	/*
+	 * Sending the sealed memfd commits success to the daemon. Finish all
+	 * package cleanup first so the daemon never needs to wait for our exit.
+	 */
+	do_deb_destroy_backend();
+
 	// Send the snapshot fd to the daemon.
 	struct msghdr _msg = {0};
 	struct iovec iov = { .iov_base = (char[1]){0}, .iov_len = 1 };
@@ -105,7 +114,6 @@ int main(int argc, char * const argv[])
 		char err_buff[256];
 		msg(LOG_ERR, "sendmsg failed (%s)",
 		    strerror_r(errno, err_buff, sizeof(err_buff)));
-		do_deb_destroy_backend();
 		close(sock_fd);
 		close(memfd);
 		return 1;
@@ -113,7 +121,5 @@ int main(int argc, char * const argv[])
 
 	close(sock_fd);
 	close(memfd);
-
-	do_deb_destroy_backend();
 	return 0;
 }
