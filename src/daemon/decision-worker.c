@@ -108,6 +108,8 @@ static void save_last_queue_metrics(void);
 static int setup_decision_worker(const conf_t *conf, unsigned int worker_id);
 static void cleanup_worker_setup(unsigned int worker_count);
 static int worker_owns_reports(const struct decision_worker *worker);
+static int report_dequeue_timeout(struct decision_worker *worker,
+		const struct timespec *report_timeout, struct timespec *timeout);
 static unsigned int timing_queue_depth_reset(void *ctx);
 static unsigned int timing_queue_depth_restore(void *ctx, unsigned int saved);
 static struct decision_worker *dispatcher_worker_for_metadata(
@@ -309,6 +311,42 @@ static struct decision_defer_queue *worker_defer_queue(
 static int worker_owns_reports(const struct decision_worker *worker)
 {
 	return worker && worker->id == 0;
+}
+
+/*
+ * report_dequeue_timeout - combine report and deferred-event deadlines.
+ * @worker: report-owning decision worker whose defer queue is inspected.
+ * @report_timeout: absolute CLOCK_REALTIME deadline for the next report.
+ * @timeout: destination for the absolute queue wait deadline.
+ *
+ * A deferred permission event may be waiting for stale BUILDING state to be
+ * evicted. The eviction check runs only when deferred events are revisited, so
+ * the report owner must not sleep until a later report deadline and bypass the
+ * one-second defer cadence used by every other worker.
+ *
+ * Returns 1 when deferred events need rechecking, 0 otherwise.
+ */
+static int report_dequeue_timeout(struct decision_worker *worker,
+		const struct timespec *report_timeout, struct timespec *timeout)
+{
+	struct timespec defer_timeout;
+
+	if (worker == NULL || report_timeout == NULL || timeout == NULL)
+		return 0;
+
+	*timeout = *report_timeout;
+	if (!decision_defer_has_events(worker_defer_queue(worker)))
+		return 0;
+
+	if (clock_gettime(CLOCK_REALTIME, &defer_timeout) == 0) {
+		defer_timeout.tv_sec += DEFER_RECHECK_INTERVAL_SEC;
+		if (defer_timeout.tv_sec < timeout->tv_sec ||
+		    (defer_timeout.tv_sec == timeout->tv_sec &&
+		     defer_timeout.tv_nsec < timeout->tv_nsec))
+			*timeout = defer_timeout;
+	}
+
+	return 1;
 }
 
 /*
@@ -1643,6 +1681,20 @@ int test_notify_report_timer_init(unsigned int interval, struct timespec *timeou
 }
 
 /*
+ * test_notify_report_dequeue_timeout - expose the report/defer deadline.
+ * @report_timeout: synthetic absolute report deadline.
+ * @timeout: destination for the selected queue deadline.
+ *
+ * Returns 1 when worker 0 has deferred events, 0 otherwise.
+ */
+int test_notify_report_dequeue_timeout(const struct timespec *report_timeout,
+		struct timespec *timeout)
+{
+	return report_dequeue_timeout(&decision_workers[0], report_timeout,
+				      timeout);
+}
+
+/*
  * test_notify_report_timer_destroy - release report timer state after tests.
  *
  * Returns nothing.
@@ -1738,15 +1790,26 @@ static void *decision_worker_main(void *arg)
 
 		// if an interval has been configured
 		if (owns_reports && rpt_interval) {
+			struct timespec timeout;
+			int timed_for_defer, timed_out;
+
+			/*
+			 * Never wait directly on rpt_timeout here. Deferred
+			 * permission events need their independent stale-
+			 * BUILDING recheck deadline.
+			 */
+			timed_for_defer = report_dequeue_timeout(worker,
+					&rpt_timeout, &timeout);
 			errno = 0;
 			rc = q_timed_dequeue(worker->queue, &event,
-					     &rpt_timeout);
+					     &timeout);
 			if (rc == 0) {
 				uint64_t expired = 0;
 
+				timed_out = errno == ETIMEDOUT;
 				worker_health_heartbeat(&worker->health);
 				// check for timer expirations
-				if (errno == ETIMEDOUT) {
+				if (timed_out) {
 					if (read(rpt_timer_fd, &expired,
 						 sizeof(uint64_t)) == -1) {
 						// EAGAIN expected w/nonblocking
@@ -1786,6 +1849,9 @@ static void *decision_worker_main(void *arg)
 					}
 					rpt_timeout.tv_sec += rpt_interval;
 				}
+				if (timed_for_defer && timed_out)
+					release_ready_deferred_events(
+						worker, &rpt_is_stale);
 				continue;
 			}
 			if (rc < 0)

@@ -1193,6 +1193,53 @@ static void test_interval_report_deadline(void)
 }
 
 /*
+ * test_interval_report_defer_deadline - preserve deferred-event liveness.
+ *
+ * Worker 0 owns interval reports, but its report deadline must not hide the
+ * shorter deferred-event deadline. Otherwise a quiet worker never revisits a
+ * permission event after the BUILDING subject ahead of it becomes stale.
+ *
+ * Returns nothing. Exits on test failure.
+ */
+static void test_interval_report_defer_deadline(void)
+{
+	decision_event_t event = { 0 };
+	struct timespec now, report_timeout, selected_timeout;
+
+	CHECK(test_notify_defer_reset(1) == 0, 202,
+	      "[ERROR:202] report deadline defer reset failed");
+	CHECK(clock_gettime(CLOCK_REALTIME, &now) == 0, 203,
+	      "[ERROR:203] failed reading report deadline clock");
+	report_timeout = now;
+	report_timeout.tv_sec += 30;
+
+	CHECK(test_notify_report_dequeue_timeout(&report_timeout,
+			&selected_timeout) == 0, 204,
+	      "[ERROR:204] empty defer queue shortened report deadline");
+	CHECK(selected_timeout.tv_sec == report_timeout.tv_sec &&
+	      selected_timeout.tv_nsec == report_timeout.tv_nsec, 205,
+	      "[ERROR:205] empty defer queue changed report deadline");
+
+	event.metadata.fd = FAN_NOFD;
+	event.metadata.pid = 700;
+	event.metadata.mask = FAN_OPEN_PERM;
+	event.subject_slot = 0;
+	event.completed_subject_slot = DECISION_EVENT_NO_SLOT;
+	CHECK(test_notify_defer_push(&event) == 0, 206,
+	      "[ERROR:206] failed parking report-owner deferred event");
+	CHECK(test_notify_report_dequeue_timeout(&report_timeout,
+			&selected_timeout) == 1, 207,
+	      "[ERROR:207] report wait missed deferred event");
+	CHECK(clock_gettime(CLOCK_REALTIME, &now) == 0, 208,
+	      "[ERROR:208] failed reading selected deadline clock");
+	CHECK(selected_timeout.tv_sec < report_timeout.tv_sec &&
+	      selected_timeout.tv_sec <= now.tv_sec + 1, 209,
+	      "[ERROR:209] report wait did not use defer recheck deadline");
+
+	test_notify_defer_destroy();
+}
+
+/*
  * test_interval_report_disable_closes_timer - invalidate a disabled timer.
  *
  * A later pool cleanup must not close an unrelated descriptor after the
@@ -1244,6 +1291,7 @@ int main(void)
 	test_notify_queue_report_reset();
 	test_deferred_dispatch_refreshes_health();
 	test_interval_report_deadline();
+	test_interval_report_defer_deadline();
 	test_interval_report_disable_closes_timer();
 	test_nonblocking_fanotify_reads();
 	test_fatal_signal_fanotify_close();
