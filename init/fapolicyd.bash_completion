@@ -178,7 +178,21 @@ _fapolicyd()
 	fi
 }
 
+_fagenrules()
+{
+	local cur opts
+	COMPREPLY=()
+	cur="${COMP_WORDS[COMP_CWORD]}"
+	opts="--check --load"
+
+	if [[ ${cur} == -* ]] ; then
+		mapfile -t COMPREPLY < <(compgen -W "${opts}" -- "${cur}")
+		return 0
+	fi
+}
+
 complete -F _fapolicydcli fapolicyd-cli
 complete -F _fapolicyd fapolicyd
+complete -F _fagenrules fagenrules
 
 # ex: filetype=sh
