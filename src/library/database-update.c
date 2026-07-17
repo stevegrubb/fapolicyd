@@ -39,6 +39,8 @@
  * RELOAD_TRUSTDB_COMMAND requests are coalesced. If a reload arrives while one
  * is active, one follow-up request stays pending so a SIGHUP that changes
  * backend configuration cannot be hidden by an earlier rebuild.
+ * Once published, the FIFO must have a live consumer. Transient resource
+ * failures are retried so control-plane updates cannot silently stop.
  */
 
 #include "config.h"
@@ -53,6 +55,7 @@
 #include <fcntl.h>
 #include <ctype.h>
 #include <signal.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -77,6 +80,7 @@ enum {
 #define UPDATE_BUFFER_SIZE 4096
 /* fd 0 is valid when the daemon starts with stdin closed. */
 #define UPDATE_FIFO_CLOSED_FD (-1)
+#define UPDATE_RETRY_DELAY_SEC 1
 
 static struct pollfd ffd[1] = { { UPDATE_FIFO_CLOSED_FD, 0, 0 } };
 static pthread_t update_thread;
@@ -92,6 +96,19 @@ extern atomic_bool stop;
 extern atomic_bool reload_rules;
 
 static void *update_thread_main(void *arg);
+
+/*
+ * update_retry_delay - pause before retrying a transient controller failure.
+ *
+ * Returns nothing. Shutdown is observed before retrying the failed operation.
+ */
+static void update_retry_delay(void)
+{
+	struct timespec delay = { .tv_sec = UPDATE_RETRY_DELAY_SEC };
+
+	while (!stop && nanosleep(&delay, &delay) && errno == EINTR)
+		;
+}
 
 /*
  * database_update_close_fifo - close the update FIFO if it is open.
@@ -522,10 +539,13 @@ static void *update_thread_main(void *arg)
 {
 	int rc;
 	int flags;
+	int poll_error_logged = 0;
+	int reader_error_logged = 0;
 	sigset_t sigs;
 	char buff[UPDATE_BUFFER_SIZE];
 	char err_buff[UPDATE_BUFFER_SIZE];
 	conf_t *config = (conf_t *)arg;
+	fd_fgets_state_t *st = NULL;
 	int do_operation = DB_NO_OP;
 
 #ifdef DEBUG
@@ -563,6 +583,23 @@ static void *update_thread_main(void *arg)
 	}
 	ffd[0].events = POLLIN;
 
+	/*
+	 * This thread is the only consumer of runtime rule, trust database, and
+	 * FIFO update requests. No supervisor restarts it, so transient failures
+	 * must not leave the daemon permanently enforcing stale state.
+	 */
+	while (!stop && st == NULL) {
+		st = fd_fgets_init();
+		if (st == NULL) {
+			if (!reader_error_logged) {
+				msg(LOG_ERR,
+				    "Failed to initialize buffered FIFO reader; retrying");
+				reader_error_logged = 1;
+			}
+			update_retry_delay();
+		}
+	}
+
 	while (!stop) {
 		int trust_reload_done_this_cycle = 0;
 
@@ -593,31 +630,32 @@ static void *update_thread_main(void *arg)
 #endif
 
 		if (rc < 0) {
-			if (errno == EINTR) {
+			int poll_errno = errno;
+
+			if (poll_errno == EINTR) {
 #ifdef DEBUG
 				msg(LOG_DEBUG, "update poll rc = EINTR");
 #endif
 				continue;
-			} else {
-				msg(LOG_ERR, "Update poll error (%s)",
-				    strerror_r(errno, err_buff,
-					       UPDATE_BUFFER_SIZE));
-				goto finalize;
 			}
+
+			if (!poll_error_logged) {
+				msg(LOG_ERR, "Update poll error (%s); retrying",
+				    strerror_r(poll_errno, err_buff,
+					       UPDATE_BUFFER_SIZE));
+				poll_error_logged = 1;
+			}
+			update_retry_delay();
+			continue;
 		} else if (rc == 0) {
+			poll_error_logged = 0;
 #ifdef DEBUG
 			msg(LOG_DEBUG, "Update poll timeout expired");
 #endif
 			continue;
 		} else {
+			poll_error_logged = 0;
 			if (ffd[0].revents & POLLIN) {
-				fd_fgets_state_t *st = fd_fgets_init();
-
-				if (st == NULL) {
-					msg(LOG_ERR,
-				  "Failed to initialize buffered FIFO reader");
-					break;
-				}
 				do {
 					int res;
 
@@ -745,12 +783,13 @@ static void *update_thread_main(void *arg)
 						}
 					}
 				} while (!fd_fgets_eof_r(st) && !stop);
-				fd_fgets_destroy(st);
 			}
 		}
 	}
 
 finalize:
+	if (st != NULL)
+		fd_fgets_destroy(st);
 	database_update_close_fifo();
 	unlink_fifo();
 
