@@ -37,6 +37,7 @@
 #include <cap-ng.h>
 #include <sys/file.h>
 #include <sys/stat.h>	   /* umask */
+#include <sys/signalfd.h>
 #include <seccomp.h>
 #include <stdbool.h>
 #include <stdatomic.h>
@@ -1317,11 +1318,13 @@ out:
 
 int main(int argc, const char *argv[])
 {
-	struct pollfd pfd[3];
+	struct pollfd pfd[4];
 	struct sigaction sa;
 	struct rlimit limit;
-	nfds_t pfd_count = 2;
+	sigset_t control_signals;
+	nfds_t pfd_count = 3;
 	bool ready_pending = false;
+	int exit_status = 0;
 	int rc;
 
 	setlocale(LC_TIME, "");
@@ -1630,11 +1633,40 @@ int main(int argc, const char *argv[])
 	}
 	pfd[1].fd = init_fanotify(&config, m);
 	pfd[1].events = POLLIN;
-#ifdef FAPOLICYD_ENABLE_FANOTIFY_FS_ERROR
-	pfd[2].fd = fanotify_fs_error_fd();
+	/*
+	 * Without a signal fd, SIGTERM can run its handler after main tests
+	 * stop but before the untimed poll begins. No polled descriptor then
+	 * becomes ready, so shutdown deadlocks until unrelated filesystem
+	 * activity occurs. SIGHUP has the same race and can leave reload
+	 * pending. A signalfd makes either request visible to poll regardless
+	 * of whether it arrives before or during the system call.
+	 */
+	sigemptyset(&control_signals);
+	sigaddset(&control_signals, SIGTERM);
+	sigaddset(&control_signals, SIGINT);
+	sigaddset(&control_signals, SIGHUP);
+	pfd[2].fd = signalfd(-1, &control_signals,
+			SFD_CLOEXEC | SFD_NONBLOCK);
 	if (pfd[2].fd >= 0) {
-		pfd[2].events = POLLIN;
-		pfd_count = 3;
+		rc = pthread_sigmask(SIG_BLOCK, &control_signals, NULL);
+		if (rc) {
+			close(pfd[2].fd);
+			pfd[2].fd = -1;
+			errno = rc;
+		}
+	}
+	if (pfd[2].fd < 0) {
+		msg(LOG_ERR, "Cannot create control signal fd (%s)",
+			strerror(errno));
+		exit_status = 1;
+		goto shutdown;
+	}
+	pfd[2].events = POLLIN;
+#ifdef FAPOLICYD_ENABLE_FANOTIFY_FS_ERROR
+	pfd[3].fd = fanotify_fs_error_fd();
+	if (pfd[3].fd >= 0) {
+		pfd[3].events = POLLIN;
+		pfd_count = 4;
 	}
 #endif
 
@@ -1688,10 +1720,38 @@ int main(int argc, const char *argv[])
 				exit(1);
 			}
 		} else if (rc > 0) {
+			int signal_fd_error = 0;
+
+			if (pfd[2].revents &
+			    (POLLERR | POLLHUP | POLLNVAL)) {
+				signal_fd_error = EIO;
+			} else if (pfd[2].revents & POLLIN) {
+				struct signalfd_siginfo info;
+				ssize_t len;
+
+				do {
+					len = read(pfd[2].fd, &info,
+						   sizeof(info));
+				} while (len < 0 && errno == EINTR);
+				if (len != (ssize_t)sizeof(info))
+					signal_fd_error = len < 0 ? errno : EIO;
+				else if (info.ssi_signo == SIGHUP)
+					hup_handler(info.ssi_signo);
+				else
+					term_handler(info.ssi_signo);
+			}
+			if (signal_fd_error) {
+				msg(LOG_ERR, "Control signal fd failed (%s)",
+					strerror(signal_fd_error));
+				exit_status = 1;
+				stop = true;
+			}
+			if (stop)
+				continue;
 			if (pfd[1].revents & POLLIN) {
 				handle_events();
 			}
-			if (pfd_count > 2 && pfd[2].revents & POLLIN) {
+			if (pfd_count > 3 && pfd[3].revents & POLLIN) {
 				fanotify_fs_error_handle_events();
 			}
 			if (pfd[0].revents & POLLPRI) {
@@ -1721,6 +1781,7 @@ int main(int argc, const char *argv[])
 			}
 		}
 	}
+shutdown:
 	msg(LOG_INFO, "shutting down...");
 	/*
 	 * The main loop was the only reader that allowed same-process fanotify
@@ -1761,6 +1822,8 @@ int main(int argc, const char *argv[])
 	decision_config_destroy();
 	free_daemon_config(&config);
 	remove_pid_file();
+	if (pfd[2].fd >= 0)
+		close(pfd[2].fd);
 
-	return 0;
+	return exit_status;
 }
