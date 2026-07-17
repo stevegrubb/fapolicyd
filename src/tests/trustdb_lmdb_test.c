@@ -45,6 +45,19 @@ struct reload_lookup {
 	int failed;
 };
 
+struct incremental_update {
+	const char *path;
+	const char *hash;
+	trustdb_size_t size;
+	int rc;
+};
+
+struct utilization_report {
+	conf_t *config;
+	FILE *output;
+	pthread_barrier_t *start;
+};
+
 /*
  * check_failed - report enough context to diagnose hidden Automake logs.
  * @func: Test function containing the failed check.
@@ -505,6 +518,53 @@ static void *reload_lookup_worker(void *arg)
 	}
 
 	return NULL;
+}
+
+/*
+ * incremental_update_worker - store one package-manager FIFO record.
+ * @arg: struct incremental_update describing the record and result.
+ *
+ * Returns NULL after database_store_update_record() completes.
+ */
+static void *incremental_update_worker(void *arg)
+{
+	struct incremental_update *update = arg;
+
+	update->rc = database_store_update_record(update->path, update->size,
+						  update->hash);
+	return NULL;
+}
+
+/*
+ * utilization_report_worker - collect sizing data on a worker thread.
+ * @arg: struct utilization_report containing output and start barrier.
+ *
+ * Returns NULL after the report completes.
+ */
+static void *utilization_report_worker(void *arg)
+{
+	struct utilization_report *report = arg;
+
+	pthread_barrier_wait(report->start);
+	database_utilization_report(report->output, report->config);
+	return NULL;
+}
+
+/*
+ * timed_join - join a test worker before a short real-time deadline.
+ * @thread: worker to join.
+ * @seconds: number of seconds allowed for completion.
+ *
+ * Returns pthread_timedjoin_np()'s status.
+ */
+static int timed_join(pthread_t thread, time_t seconds)
+{
+	struct timespec deadline;
+
+	if (clock_gettime(CLOCK_REALTIME, &deadline))
+		return errno;
+	deadline.tv_sec += seconds;
+	return pthread_timedjoin_np(thread, NULL, &deadline);
 }
 
 static int with_temp_db(char *tmpdir, size_t tmpdir_sz, conf_t *cfg)
@@ -1299,6 +1359,89 @@ static int test_lmdb_incremental_update_keeps_duplicate_hashes(void)
 }
 
 /*
+ * test_lmdb_shared_environment_ownership - verify live environment locking.
+ *
+ * Incremental LMDB writes must coexist with decision readers while state
+ * sizing reports must wait for exclusive close/swap ownership. Final reports
+ * must also tolerate the database and update lock already being closed.
+ *
+ * Returns 0 when all three lifetime rules hold.
+ */
+static int test_lmdb_shared_environment_ownership(void)
+{
+	const char *digest =
+		"abababababababababababababababababababababababababababababababab";
+	struct incremental_update update = {
+		.path = "/usr/bin/shared-update-lock",
+		.hash = digest,
+		.size = 4096,
+		.rc = 1,
+	};
+	struct utilization_report utilization;
+	pthread_barrier_t report_start;
+	pthread_t thread;
+	conf_t cfg;
+	char dir[128];
+	char report[512];
+	int join_rc;
+	int cleanup_rc = 0;
+	int rc;
+
+	rc = with_temp_db(dir, sizeof(dir), &cfg);
+	CHECK(rc == 0, 266, "[ERROR:266] shared-lock LMDB setup failed");
+
+	database_update_read_lock();
+	rc = pthread_create(&thread, NULL, incremental_update_worker, &update);
+	if (rc)
+		database_update_read_unlock();
+	CHECK(rc == 0, 267, "[ERROR:267] incremental writer create failed");
+
+	join_rc = timed_join(thread, 2);
+	database_update_read_unlock();
+	if (join_rc)
+		cleanup_rc = pthread_join(thread, NULL);
+	CHECK(join_rc == 0, 268,
+	      "[ERROR:268] incremental writer blocked a shared DB reader");
+	CHECK(cleanup_rc == 0 && update.rc == 0, 269,
+	      "[ERROR:269] shared-lock incremental writer failed");
+
+	utilization.config = &cfg;
+	utilization.output = tmpfile();
+	CHECK(utilization.output != NULL, 270,
+	      "[ERROR:270] utilization report output setup failed");
+	rc = pthread_barrier_init(&report_start, NULL, 2);
+	CHECK(rc == 0, 271,
+	      "[ERROR:271] utilization report barrier setup failed");
+	utilization.start = &report_start;
+
+	lock_update_thread();
+	rc = pthread_create(&thread, NULL, utilization_report_worker,
+			    &utilization);
+	if (rc)
+		unlock_update_thread();
+	CHECK(rc == 0, 272, "[ERROR:272] utilization reporter create failed");
+	pthread_barrier_wait(&report_start);
+	join_rc = timed_join(thread, 1);
+	unlock_update_thread();
+	if (join_rc)
+		cleanup_rc = pthread_join(thread, NULL);
+	pthread_barrier_destroy(&report_start);
+	fclose(utilization.output);
+	CHECK(join_rc == ETIMEDOUT, 273,
+	      "[ERROR:273] utilization report bypassed exclusive DB ownership");
+	CHECK(cleanup_rc == 0, 274,
+	      "[ERROR:274] utilization reporter cleanup failed");
+
+	database_close_for_tests();
+	CHECK(read_database_utilization_text(&cfg, report, sizeof(report)) == 0,
+	      275, "[ERROR:275] utilization report failed after DB close");
+	database_set_location(NULL, NULL);
+	CHECK(remove_lmdb_files(dir) == 0, 276,
+	      "[ERROR:276] shared-lock LMDB cleanup failed");
+	return 0;
+}
+
+/*
  * test_lmdb_rpm_sha256_only_rejects_stale_sha1 - enforce lookup hash floor.
  *
  * RPM compatibility mode must continue trusting SHA1 RPM records for older
@@ -1868,6 +2011,10 @@ int main(void)
 		return rc;
 
 	rc = test_lmdb_incremental_update_keeps_duplicate_hashes();
+	if (rc)
+		return rc;
+
+	rc = test_lmdb_shared_environment_ownership();
 	if (rc)
 		return rc;
 

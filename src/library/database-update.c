@@ -318,6 +318,9 @@ void unlock_update_thread(void)
  */
 void database_update_read_lock(void)
 {
+	/* Shutdown reports can run after close_database() destroys this lock. */
+	if (!update_lock_inited)
+		return;
 	pthread_rwlock_rdlock(&update_lock);
 }
 
@@ -328,6 +331,8 @@ void database_update_read_lock(void)
  */
 void database_update_read_unlock(void)
 {
+	if (!update_lock_inited)
+		return;
 	pthread_rwlock_unlock(&update_lock);
 }
 
@@ -368,6 +373,11 @@ void unlock_rule(void)
  *
  * Returns 0 after successfully storing the record, 1 when processing should
  * stop due to malformed data or a shutdown request.
+ *
+ * A future throughput optimization may collect a bounded run of ONE_FILE
+ * commands and store them in one LMDB transaction. Such a batch must flush
+ * before control commands and on a time or record limit so package scriptlets
+ * see new trust records promptly.
  */
 static int handle_update_record(const char *buffer)
 {

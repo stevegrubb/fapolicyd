@@ -827,6 +827,9 @@ static int read_live_lmdb_sizing_state(struct trust_db_sizing_state *state)
 	struct trust_db_generation *gen;
 	int rc;
 
+	if (env == NULL)
+		return EINVAL;
+
 	rc = mdb_env_info(env, &info);
 	if (rc)
 		return rc;
@@ -3050,6 +3053,12 @@ void database_utilization_report(FILE *f, const conf_t *config)
 {
 	database_generation_report_t report;
 
+	/*
+	 * State reports run on decision workers and can overlap the update
+	 * thread. Shared ownership prevents close_env() or a compaction swap from
+	 * invalidating the live LMDB handles while sizing reads use them.
+	 */
+	database_update_read_lock();
 	trust_db_generation_report_snapshot(&report);
 	fprintf(f, "Trust database pages in use: %lu (%lu%%)\n", pages,
 		max_pages ? ((100*pages)/max_pages) : 0);
@@ -3063,6 +3072,7 @@ void database_utilization_report(FILE *f, const conf_t *config)
 		report.max_reclaim_delay);
 	database_resize_report(f, config);
 	database_compaction_report(f, &report);
+	database_update_read_unlock();
 }
 
 void database_report(FILE *f)
@@ -3550,11 +3560,16 @@ int database_store_update_record(const char *path, trustdb_size_t size,
 	snprintf(data, BUFFER_SIZE, DATA_FORMAT, (unsigned int)SRC_UNKNOWN,
 		 size, hash);
 
-	lock_update_thread();
+	/*
+	 * LMDB readers and a writer can run concurrently. Shared update ownership
+	 * keeps env alive across both per-record write transactions without making
+	 * every decision reader wait during large package transactions.
+	 */
+	database_update_read_lock();
 	rc = write_db(path, 0, data);
 	if (rc == 0)
 		refresh_active_generation_metadata();
-	unlock_update_thread();
+	database_update_read_unlock();
 
 	return rc;
 }
