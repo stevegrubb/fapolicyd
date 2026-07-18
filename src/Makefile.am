@@ -156,6 +156,8 @@ fapolicyd_SOURCES = \
 	daemon/worker-health.h
 
 fapolicyd_cli_SOURCES = \
+	cli/cli-privilege.c \
+	cli/cli-privilege.h \
 	cli/fapolicyd-cli.c \
 	cli/file-cli.c \
 	cli/file-cli.h \

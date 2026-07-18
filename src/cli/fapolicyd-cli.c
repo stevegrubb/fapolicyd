@@ -62,6 +62,7 @@
 #include "file.h"
 #include "ignore-mounts.h"
 #include "rule-lint.h"
+#include "cli-privilege.h"
 
 bool verbose = false;
 static bool lint_rules = false;
@@ -1510,6 +1511,8 @@ static int run_cli_command(int arg_count, char **args)
 			goto args_err;
 		if (arg_count > 2)
 			goto args_err;
+		if (cli_require_privilege(CLI_PRIVILEGE_ROOT_OR_GROUP))
+			return CLI_EXIT_IO;
 		rc = do_delete_db();
 		break;
 	case 'D':
@@ -1517,6 +1520,8 @@ static int run_cli_command(int arg_count, char **args)
 			goto args_err;
 		if (arg_count > 2)
 			goto args_err;
+		if (cli_require_privilege(CLI_PRIVILEGE_ROOT_OR_GROUP))
+			return CLI_EXIT_IO;
 		rc = do_dump_db();
 		break;
 	case 'f':
@@ -1524,6 +1529,8 @@ static int run_cli_command(int arg_count, char **args)
 			goto args_err;
 		if (arg_count > 7)
 			goto args_err;
+		if (cli_require_privilege(CLI_PRIVILEGE_ROOT))
+			return CLI_EXIT_IO;
 		// fapolicyd-cli, -f, | operation, path ...
 		// skip the first two args
 		rc = do_manage_files(arg_count-2, args+2);
@@ -1547,6 +1554,8 @@ static int run_cli_command(int arg_count, char **args)
 			goto args_err;
 		if (arg_count > 2)
 			goto args_err;
+		if (cli_require_privilege(CLI_PRIVILEGE_ROOT_OR_GROUP))
+			return CLI_EXIT_IO;
 		rc = do_list();
 		break;
 	case 'u':
@@ -1554,6 +1563,8 @@ static int run_cli_command(int arg_count, char **args)
 			goto args_err;
 		if (arg_count > 2)
 			goto args_err;
+		if (cli_require_privilege(CLI_PRIVILEGE_ROOT_OR_GROUP))
+			return CLI_EXIT_IO;
 		rc = do_reload(DB);
 		break;
 	case 'r':
@@ -1561,6 +1572,8 @@ static int run_cli_command(int arg_count, char **args)
 			goto args_err;
 		if (arg_count > 2)
 			goto args_err;
+		if (cli_require_privilege(CLI_PRIVILEGE_ROOT_OR_GROUP))
+			return CLI_EXIT_IO;
 		rc = do_reload(RULES);
 		break;
 
@@ -1571,6 +1584,8 @@ static int run_cli_command(int arg_count, char **args)
 			goto args_err;
 		if (arg_count > 2)
 			goto args_err;
+		if (cli_require_privilege(CLI_PRIVILEGE_ROOT_OR_GROUP))
+			return CLI_EXIT_IO;
 		set_message_mode(MSG_STDERR, DBG_YES);
 		reset_config();
 		if (load_daemon_config(&config)) {
@@ -1588,6 +1603,8 @@ static int run_cli_command(int arg_count, char **args)
 			goto args_err;
 		if (arg_count > 2)
 			goto args_err;
+		if (cli_require_privilege(CLI_PRIVILEGE_ROOT_OR_GROUP))
+			return CLI_EXIT_IO;
 		return check_watch_fs();
 		break;
 	case 3: // --check-trustdb
@@ -1595,6 +1612,8 @@ static int run_cli_command(int arg_count, char **args)
 			goto args_err;
 		if (arg_count > 2)
 			goto args_err;
+		if (cli_require_privilege(CLI_PRIVILEGE_ROOT_OR_GROUP))
+			return CLI_EXIT_IO;
 		return check_trustdb();
 		break;
 	case 4: // --check-status
@@ -1602,6 +1621,8 @@ static int run_cli_command(int arg_count, char **args)
 			goto args_err;
 		if (arg_count > 2)
 			goto args_err;
+		if (cli_require_privilege(CLI_PRIVILEGE_ROOT))
+			return CLI_EXIT_IO;
 		return do_status_report(REPORT_INTENT_STATUS, 0);
 		break;
 	case 5: // --check-path
@@ -1609,6 +1630,8 @@ static int run_cli_command(int arg_count, char **args)
 			goto args_err;
 		if (arg_count > 2)
 			goto args_err;
+		if (cli_require_privilege(CLI_PRIVILEGE_ROOT_OR_GROUP))
+			return CLI_EXIT_IO;
 		return check_path();
 		break;
 
@@ -1617,6 +1640,8 @@ static int run_cli_command(int arg_count, char **args)
 			goto args_err;
 		if (arg_count > 2)
 			goto args_err;
+		if (cli_require_privilege(CLI_PRIVILEGE_ROOT))
+			return CLI_EXIT_IO;
 		return do_status_report(REPORT_INTENT_METRICS, 0);
 		break;
 
@@ -1625,6 +1650,8 @@ static int run_cli_command(int arg_count, char **args)
 			goto args_err;
 		if (arg_count > 2)
 			goto args_err;
+		if (cli_require_privilege(CLI_PRIVILEGE_ROOT_OR_GROUP))
+			return CLI_EXIT_IO;
 		return do_reload(COMPACT);
 		break;
 
@@ -1638,6 +1665,8 @@ static int run_cli_command(int arg_count, char **args)
 			override = args[optind++];
 		if (optind < arg_count)
 			goto args_err;
+		if (cli_require_privilege(CLI_PRIVILEGE_ROOT_OR_GROUP))
+			return CLI_EXIT_IO;
 		return check_ignore_mounts(override);
 		}
 		break;
@@ -1650,6 +1679,10 @@ static int run_cli_command(int arg_count, char **args)
 			path = args[optind++];
 		if (optind < arg_count)
 			goto args_err;
+		if ((path == NULL || !strcmp(path, OLD_RULES_FILE) ||
+		     !strcmp(path, RULES_FILE)) &&
+		    cli_require_privilege(CLI_PRIVILEGE_ROOT_OR_GROUP))
+			return CLI_EXIT_IO;
 		return check_rules_file(path, lint_rules);
 		}
 		break;
@@ -1662,6 +1695,8 @@ static int run_cli_command(int arg_count, char **args)
 			goto args_err;
 		if (arg_count > 2)
 			goto args_err;
+		if (cli_require_privilege(CLI_PRIVILEGE_ROOT))
+			return CLI_EXIT_IO;
 		return do_status_report(REPORT_INTENT_RESET_METRICS, 1);
 
 	case 12: // --timing-start
@@ -1669,6 +1704,8 @@ static int run_cli_command(int arg_count, char **args)
 			goto args_err;
 		if (arg_count > 2)
 			goto args_err;
+		if (cli_require_privilege(CLI_PRIVILEGE_ROOT))
+			return CLI_EXIT_IO;
 		return do_timing_control(REPORT_INTENT_TIMING_ARM);
 
 	case 13: // --timing-stop
@@ -1676,6 +1713,8 @@ static int run_cli_command(int arg_count, char **args)
 			goto args_err;
 		if (arg_count > 2)
 			goto args_err;
+		if (cli_require_privilege(CLI_PRIVILEGE_ROOT))
+			return CLI_EXIT_IO;
 		return do_timing_control(REPORT_INTENT_TIMING_STOP);
 
 	case 'y':
@@ -1687,6 +1726,8 @@ static int run_cli_command(int arg_count, char **args)
 			goto args_err;
 		if (arg_count > 3)
 			goto args_err;
+		if (cli_require_privilege(CLI_PRIVILEGE_ROOT_OR_GROUP))
+			return CLI_EXIT_IO;
 		return do_test_filter(optarg);
 		}
 		break;

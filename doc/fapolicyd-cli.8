@@ -5,6 +5,43 @@ fapolicyd-cli \- Fapolicyd CLI Tool
 \fBfapolicyd-cli\fP [\fIoptions\fP]
 .SH DESCRIPTION
 The fapolicyd command line utility performs maintenance and troubleshooting tasks for fapolicyd. It can ask the daemon to reload state, inspect the trust database, validate configuration, test filter decisions, and manage administrator-defined trust entries. Normally the daemon learns about package changes through integration such as the dnf plugin, but manual package installation or direct edits to trust files still require explicit administrator action.
+.SH PRIVILEGES
+The CLI checks command privilege requirements before accessing protected files
+or contacting the daemon. The following commands require root because they
+modify administrator-owned trust files or use daemon controls restricted to a
+privileged signal sender:
+.BR \-\-file ,
+.BR \-\-check-status ,
+.BR \-\-check-metrics ,
+.BR \-\-reset-metrics ,
+.BR \-\-timing-start ,
+and
+.BR \-\-timing-stop .
+.PP
+Commands that read the installed configuration, rules, or trust database, and
+commands that use the daemon update FIFO, accept either root or a caller in the
+group that owns
+.IR /etc/fapolicyd .
+These include
+.BR \-\-check-config ,
+.BR \-\-check-path ,
+.BR \-\-check-trustdb ,
+.BR \-\-check-watch_fs ,
+.BR \-\-check-ignore_mounts ,
+.BR \-\-list ,
+.BR \-\-dump-db ,
+.BR \-\-delete-db ,
+.BR \-\-update ,
+.BR \-\-reload-rules ,
+.BR \-\-compact-trustdb ,
+and
+.BR \-\-test-filter .
+Checking the active rules with
+.B \-\-check-rules
+has the same requirement. An unprivileged caller may still check an explicitly
+named readable rules file, classify a readable file with
+.BR \-\-ftype ,
+or display help.
 .SH OPTIONS
 .TP
 .B \-h, \-\-help
