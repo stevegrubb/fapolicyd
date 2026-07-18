@@ -12,6 +12,7 @@
 - Allow packages to append MIME types to the %languages policy set
 - fapolicyd-cli now has --ftype-ext emits NUL-delimited path and MIME pairs
 - Move the pid file into /run/fapolicyd and restrict it to the daemon
+- Improve privilege error messages in fapolicyd-cli
 
 1.6
 - Many internal changes
