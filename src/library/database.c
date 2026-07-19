@@ -1243,6 +1243,12 @@ static void trust_db_generation_release(struct trust_db_generation *gen)
 		gen->readers--;
 	pthread_mutex_unlock(&generation_lock);
 
+	/*
+	 * FIXME: Reclaim can block in an LMDB write transaction while a
+	 * decision lookup still holds the update read lock. Investigate
+	 * handing retired generations to the update thread; an empty-list
+	 * fast path alone does not prevent a blocking database drop.
+	 */
 	trust_db_reclaim_retired();
 }
 

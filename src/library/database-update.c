@@ -210,6 +210,13 @@ int database_update_controls_init(void)
 	int rc;
 
 	if (!update_lock_inited) {
+		/*
+		 * FIXME: Default glibc rwlocks can starve an update writer
+		 * under overlapping integrity lookups. Audit recursive read
+		 * locking, then investigate
+		 * PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP with a portable
+		 * fallback.
+		 */
 		rc = pthread_rwlock_init(&update_lock, NULL);
 		if (rc)
 			return rc;

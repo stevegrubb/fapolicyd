@@ -1245,6 +1245,12 @@ static decision_t process_event_evaluate(event_t *e,
 	// Output some information if debugging on or syslogging requested
 	if ( (results & SYSLOG) || (debug_mode == 1) ||
 	     (debug_mode > 1 && (results & DENY)) ) {
+		/*
+		 * FIXME: Pre-reply log formatting, and object trust added to
+		 * FAN_AUDIT in reply_event_write(), can lazily hash files or
+		 * invoke libmagic. Investigate cached audit values and
+		 * splitting live subject capture from post-reply object work.
+		 */
 		if (log_record) {
 			/*
 			 * Permission events keep the process pinned until the caller
@@ -1419,6 +1425,12 @@ static void reply_event_write(int fd,
 	struct decision_timing_span write_timing;
 
 #ifdef FAN_AUDIT_RULE_NUM
+	/*
+	 * FIXME: Persist FAN_ENABLE_AUDIT support across policy reloads, mask
+	 * FAN_AUDIT when unavailable, and investigate safely retrying a failed
+	 * FAN_INFO response as a plain response so permission events are
+	 * answered.
+	 */
 	if (reply & FAN_AUDIT && response_info_supported) {
 		struct fan_audit_response f;
 		subject_attr_t *sn;

@@ -429,6 +429,13 @@ int q_dequeue(struct queue *q, decision_event_t *data)
 int q_timed_dequeue(struct queue *q, decision_event_t *data,
 		    const struct timespec *ts)
 {
+	/*
+	 * FIXME: sem_timedwait uses CLOCK_REALTIME, so backward wall-clock
+	 * steps extend deferred-event and report waits. Investigate
+	 * configure-detected sem_clockwait with CLOCK_MONOTONIC and a
+	 * fallback for older libc, keeping worker deadlines and the report
+	 * timerfd on the same clock.
+	 */
 	for (;;) {
 		if (sem_timedwait(&q->sem, ts)) {
 			if (errno == EINTR)
