@@ -2551,7 +2551,8 @@ static int init_db_with_generations(const conf_t *config,
 		return 2;
 	}
 
-	if (mdb_env_set_mapsize(env, config->db_max_size*MEGABYTE)) {
+	if (mdb_env_set_mapsize(env,
+			(size_t)config->db_max_size * MEGABYTE)) {
 		/* Clean up environment on failure */
 		mdb_env_close(env);
 		env = NULL;
