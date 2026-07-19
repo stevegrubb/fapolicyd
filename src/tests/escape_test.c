@@ -66,13 +66,13 @@ int main(void)
 
 	/* unescape_shell */
 	char buf1[] = "\\040\\$";
-	unescape_shell(buf1, sizeof(buf1));
+	unescape_shell(buf1, strlen(buf1));
 	if (strcmp(buf1, " $")) {
 		fprintf(stderr, "[ERROR:3] unescape_shell octal '%s'\n", buf1);
 		return 3;
 	}
 	char buf2[] = "abc\\";
-	unescape_shell(buf2, sizeof(buf2));
+	unescape_shell(buf2, strlen(buf2));
 	if (strcmp(buf2, "abc\\")) {
 		fprintf(stderr, "[ERROR:3] trailing '%s'\n", buf2);
 		return 3;

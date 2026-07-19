@@ -103,19 +103,30 @@ char *escape_shell(const char *input, const size_t expected_size)
 }
 
 #define isoctal(a) (((a) & ~7) == '0')
+
+/*
+ * unescape_shell - decode shell and octal escapes in place.
+ * @s: writable NUL-terminated string.
+ * @len: number of characters before the terminating NUL.
+ *
+ * Returns nothing. Incomplete octal escapes are copied unchanged.
+ */
 void unescape_shell(char *s, const size_t len)
 {
 	size_t sz = 0;
 	char *buf = s;
 
-	while (*s) {
-		if (*s == '\\' && sz + 3 < len && isoctal(s[1]) &&
+	while (sz < len) {
+		size_t remaining = len - sz;
+
+		if (*s == '\\' && remaining >= 4 && isoctal(s[1]) &&
 		    isoctal(s[2]) && isoctal(s[3])) {
 
 			*buf++ = 64*(s[1] & 7) + 8*(s[2] & 7) + (s[3] & 7);
 			s += 4;
 			sz += 4;
-		} else if (*s == '\\' && sz + 2 < len) {
+		} else if (*s == '\\' && remaining >= 2 &&
+			   !isoctal(s[1])) {
 			*buf++ = s[1];
 			s += 2;
 			sz += 2;

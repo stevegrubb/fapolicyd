@@ -27,11 +27,12 @@
 
 #include "gcc-attributes.h"
 
-char *escape_shell(const char *, const size_t) __attr_dealloc_free __attr_access ((__read_only__, 1, 2));
+char *escape_shell(const char *, const size_t) __attr_dealloc_free
+	__attr_access ((__read_only__, 1));
 size_t check_escape_shell(const char *);
-void unescape_shell(char *s, const size_t len) __attr_access ((__read_write__, 1, 2));
+void unescape_shell(char *s, const size_t len)
+	__attr_access ((__read_write__, 1));
 
 char *unescape(const char *input) __attr_dealloc_free;
 
 #endif
-
