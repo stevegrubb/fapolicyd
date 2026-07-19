@@ -27,12 +27,17 @@
 
 #include "gcc-attributes.h"
 
-char *escape_shell(const char *, const size_t) __attr_dealloc_free
+/* @expected_size must be the exact encoded length, excluding its NUL. */
+char *escape_shell(const char *input, size_t expected_size) __attribute_malloc__
+	__attr_dealloc_free __wur __attr_access ((__read_only__, 1));
+/* Return the encoded length when escaping is needed, otherwise zero. */
+size_t check_escape_shell(const char *input) __wur
 	__attr_access ((__read_only__, 1));
-size_t check_escape_shell(const char *);
-void unescape_shell(char *s, const size_t len)
-	__attr_access ((__read_write__, 1));
+/* @capacity includes the required NUL terminator. */
+int unescape_shell(char *s, size_t capacity) __nonnull ((1)) __wur
+	__attr_access ((__read_write__, 1, 2));
 
-char *unescape(const char *input) __attr_dealloc_free;
+char *unescape(const char *input) __attribute_malloc__ __attr_dealloc_free
+	__nonnull ((1)) __wur __attr_access ((__read_only__, 1));
 
 #endif

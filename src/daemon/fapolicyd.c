@@ -862,7 +862,12 @@ static int read_mount_list(int fd, mlist *next)
 				    "Skipping malformed mount (%s)", buf);
 				continue;
 			}
-			unescape_shell(point, strlen(point));
+			if (unescape_shell(point, sizeof(buf) -
+					   (size_t)(point - buf))) {
+				msg(LOG_WARNING,
+				    "Skipping unterminated mount point");
+				continue;
+			}
 			// Is this one that we care about?
 			if (check_mount_entry(point, type)) {
 				if (mlist_append(next, point)) {
