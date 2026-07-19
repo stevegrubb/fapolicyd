@@ -61,4 +61,8 @@ const char *lookup_integrity(unsigned value);
 const char *lookup_reset_strategy(unsigned value);
 const char *lookup_timing_collection(unsigned value);
 
+// Function for unit test use
+int daemon_config_parse_unsigned_for_tests(unsigned int *value,
+	const char *text);
+
 #endif

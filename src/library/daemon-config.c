@@ -36,6 +36,8 @@
 
 #include <stdio.h>
 #include <errno.h>
+#include <inttypes.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -691,14 +693,29 @@ int validate_daemon_config(const conf_t *config)
 	return validate_decision_threads(config);
 }
 
-static int unsigned_int_parser(unsigned *i, const char *str, int line)
+/*
+ * uintmax_parser - parse a decimal configuration value within a type limit.
+ * @value: destination for the parsed value.
+ * @max: largest value accepted by the destination type.
+ * @str: configuration token to parse.
+ * @line: source line used in error messages.
+ *
+ * Returns 0 on success and 1 for malformed or out-of-range input.
+ */
+static int uintmax_parser(uintmax_t *value, uintmax_t max, const char *str,
+		int line)
 {
 	const char *ptr = str;
-	unsigned int j;
+	char *end;
+	uintmax_t parsed;
 
 	/* check that all chars are numbers */
-	for (j=0; ptr[j]; j++) {
-		if (!isdigit((unsigned char)ptr[j])) {
+	if (*ptr == '\0') {
+		msg(LOG_ERR, "Value should not be empty - line %d", line);
+		return 1;
+	}
+	for (; *ptr; ptr++) {
+		if (!isdigit((unsigned char)*ptr)) {
 			msg(LOG_ERR,
 				"Value %s should only be numbers - line %d",
 				str, line);
@@ -706,16 +723,36 @@ static int unsigned_int_parser(unsigned *i, const char *str, int line)
 		}
 	}
 
-	/* convert to unsigned long */
+	/* convert only after syntax validation so signs are never accepted */
 	errno = 0;
-	j = strtoul(str, NULL, 10);
+	parsed = strtoumax(str, &end, 10);
 	if (errno) {
 		msg(LOG_ERR,
 			"Error converting string to a number (%s) - line %d",
 			strerror(errno), line);
 		return 1;
 	}
-	*i = j;
+	if (*end != '\0') {
+		msg(LOG_ERR, "Value %s should only be numbers - line %d",
+			str, line);
+		return 1;
+	}
+	if (parsed > max) {
+		msg(LOG_ERR, "Value %s is outside supported range - line %d",
+			str, line);
+		return 1;
+	}
+	*value = parsed;
+	return 0;
+}
+
+static int unsigned_int_parser(unsigned *i, const char *str, int line)
+{
+	uintmax_t value;
+
+	if (uintmax_parser(&value, UINT_MAX, str, line))
+		return 1;
+	*i = (unsigned int)value;
 	return 0;
 }
 
@@ -782,13 +819,14 @@ static int uid_parser(const struct nv_pair *nv, int line,
 	gid_t gid = 0;
 
 	if (isdigit((unsigned char)nv->value[0])) {
-		errno = 0;
-		uid = strtoul(nv->value, NULL, 10);
-		if (errno) {
-			msg(LOG_ERR,
-			"Error converting user value - line %d", line);
+		uintmax_t max = (uintmax_t)((uid_t)-1);
+		uintmax_t value;
+
+		if ((uintmax_t)((gid_t)-1) < max)
+			max = (uintmax_t)((gid_t)-1);
+		if (uintmax_parser(&value, max, nv->value, line))
 			return 1;
-		}
+		uid = (uid_t)value;
 		gid = uid;
 	} else {
 		struct passwd *pw = getpwnam(nv->value);
@@ -812,13 +850,12 @@ static int gid_parser(const struct nv_pair *nv, int line,
 	gid_t gid = 0;
 
 	if (isdigit((unsigned char)nv->value[0])) {
-		errno = 0;
-		gid = strtoul(nv->value, NULL, 10);
-		if (errno) {
-			msg(LOG_ERR,
-			"Error converting group value - line %d", line);
+		uintmax_t value;
+
+		if (uintmax_parser(&value, (uintmax_t)((gid_t)-1),
+				nv->value, line))
 			return 1;
-		}
+		gid = (gid_t)value;
 	} else {
 		struct group *gr ;
 		gr = getgrnam(nv->value);
@@ -832,6 +869,19 @@ static int gid_parser(const struct nv_pair *nv, int line,
 	}
 	config->gid = gid;
 	return 0;
+}
+
+/*
+ * daemon_config_parse_unsigned_for_tests - exercise unsigned config parsing.
+ * @value: destination for the parsed value.
+ * @text: decimal token to parse.
+ *
+ * Returns 0 on success and 1 for malformed or out-of-range input.
+ */
+int daemon_config_parse_unsigned_for_tests(unsigned int *value,
+		const char *text)
+{
+	return unsigned_int_parser(value, text, 1);
 }
 
 static int detailed_report_parser(const struct nv_pair *nv, int line,

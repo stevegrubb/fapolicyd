@@ -3,7 +3,10 @@
  */
 #include "config.h"
 #include <error.h>
+#include <inttypes.h>
+#include <limits.h>
 #include <stddef.h>
+#include <stdio.h>
 
 #include "daemon-config.h"
 
@@ -28,12 +31,27 @@ static void minimal_config(conf_t *cfg)
 }
 
 /*
- * main - verify decision_threads bounds and LMDB reader sizing.
+ * main - verify numeric parsing, decision_threads bounds, and reader sizing.
  * Returns 0 on success. Exits with error() on test failure.
  */
 int main(void)
 {
 	conf_t cfg = { 0 };
+	char overflow[64];
+	unsigned int value = 0;
+
+	CHECK(daemon_config_parse_unsigned_for_tests(&value, "123") == 0 &&
+	      value == 123, 8, "[ERROR:8] valid unsigned value was rejected");
+	CHECK(daemon_config_parse_unsigned_for_tests(&value, "123junk") != 0,
+	      9, "[ERROR:9] partially numeric value was accepted");
+	CHECK(daemon_config_parse_unsigned_for_tests(&value, "") != 0, 10,
+	      "[ERROR:10] empty unsigned value was accepted");
+	if (UINTMAX_MAX > UINT_MAX) {
+		snprintf(overflow, sizeof(overflow), "%" PRIuMAX,
+			 (uintmax_t)UINT_MAX + 1);
+		CHECK(daemon_config_parse_unsigned_for_tests(&value, overflow) != 0,
+		      11, "[ERROR:11] overflowing unsigned value was accepted");
+	}
 
 	CHECK(daemon_config_lmdb_reader_limit(NULL) ==
 	      1 + DAEMON_CONFIG_LMDB_MAINTENANCE_READERS, 1,
