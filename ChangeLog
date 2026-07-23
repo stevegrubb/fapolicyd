@@ -1,4 +1,5 @@
 2.0.1
+- Enable large file support on 32-bit builds
 
 2.0
 - Add decision_threads configuration to fapolicyd.conf
