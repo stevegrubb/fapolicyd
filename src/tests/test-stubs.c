@@ -6,6 +6,8 @@
  * or CLI entry points.
  */
 
+#include "config.h"
+
 #include <stdatomic.h>
 
 #include "conf.h"

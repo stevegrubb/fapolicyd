@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #define _GNU_SOURCE
+
+#include "config.h"
+
 #include <stdatomic.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -638,8 +641,9 @@ static int test_data_format_round_trip(void)
  * test_lmdb_large_size_import - verify the stored size is not tied to size_t.
  *
  * A 32-bit build with large-file support has a 64-bit off_t but a 32-bit
- * size_t.  Import must retain the 4 GiB value on that ABI.  A genuinely
- * narrow off_t cannot compare such a record, so the parser must reject it.
+ * size_t. Import must retain the 4 GiB value on that ABI. The bulk importer
+ * stores the ABI-independent wire record without parsing its size, so a
+ * genuinely narrow off_t must reject it during an integrity lookup.
  *
  * Returns 0 on success or a test-specific error code.
  */
@@ -648,8 +652,10 @@ static int test_lmdb_large_size_import(void)
 	conf_t cfg;
 	char dir[128];
 	char payload[256];
+	struct file_info info = { 0 };
 	long entries = 0;
 	int rc;
+	const trustdb_size_t large_size = UINT64_C(4294967296);
 	const char *path = "/usr/bin/large-size";
 	const char *digest =
 		"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
@@ -657,19 +663,27 @@ static int test_lmdb_large_size_import(void)
 	rc = with_temp_db(dir, sizeof(dir), &cfg);
 	CHECK(rc == 0, 13, "[ERROR:13] failed to open large-size LMDB");
 
+	cfg.integrity = IN_SIZE;
+	rc = decision_config_publish(&cfg);
+	CHECK(rc == 0, 14,
+	      "[ERROR:14] failed to publish size integrity config");
+
 	snprintf(payload, sizeof(payload), "%s " DATA_FORMAT "\n", path,
-		 SRC_FILE_DB, UINT64_C(4294967296), digest);
+		 SRC_FILE_DB, large_size, digest);
 	rc = import_records(payload, &entries);
+	CHECK(rc == 0 && entries == 1, 15,
+	      "[ERROR:15] large-size record import failed");
+
 	if (sizeof(off_t) >= sizeof(trustdb_size_t)) {
-		CHECK(rc == 0 && entries == 1, 14,
-		      "[ERROR:14] large-size record import failed");
-		CHECK(check_trust_database(path, NULL, -1) == 1, 15,
-		      "[ERROR:15] large-size record lookup failed");
+		info.size = (off_t)large_size;
+		CHECK(check_trust_database(path, &info, -1) == 1, 16,
+		      "[ERROR:16] large-size record lookup failed");
 	} else {
-		CHECK(rc != 0, 16,
-		      "[ERROR:16] narrow off_t accepted large-size record");
+		CHECK(check_trust_database(path, &info, -1) == -1, 16,
+		      "[ERROR:16] narrow off_t parsed large-size record");
 	}
 
+	decision_config_destroy();
 	database_close_for_tests();
 	database_set_location(NULL, NULL);
 	CHECK(remove_lmdb_files(dir) == 0, 17,

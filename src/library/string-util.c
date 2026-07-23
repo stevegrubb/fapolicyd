@@ -23,6 +23,8 @@
  *   Zoltan Fridrich <zfridric@redhat.com>
  */
 
+#include "config.h"
+
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>

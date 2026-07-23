@@ -5,6 +5,8 @@
  * syslog parsing and during syslog parsing. In both cases, the previously
  * published policy and its syslog field list must remain active.
  */
+#include "config.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

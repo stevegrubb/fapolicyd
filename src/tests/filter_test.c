@@ -1,6 +1,8 @@
 /*
  * filter_test.c - comprehensive tests for filter configuration
  */
+#include "config.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

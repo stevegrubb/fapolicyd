@@ -19,6 +19,8 @@
  * Boston, MA 02110-1335, USA.
  */
 
+#include "config.h"
+
 #include <dpkg/db-ctrl.h>
 #include <dpkg/db-fsys.h>
 #include <dpkg/pkg-array.h>

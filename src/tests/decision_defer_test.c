@@ -1,6 +1,8 @@
 /*
  * decision_defer_test.c - unit tests for subject-slot decision deferral
  */
+#include "config.h"
+
 #include <errno.h>
 #include <pthread.h>
 #include <stdio.h>

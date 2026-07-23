@@ -22,6 +22,8 @@
 *   Radovan Sroka <rsroka@redhat.com>
 */
 
+#include "config.h"
+
 #include "stack.h"
 #include <stddef.h>
 

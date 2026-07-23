@@ -1,3 +1,5 @@
+#include "config.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <error.h>
@@ -271,4 +273,3 @@ int main(void)
 
 	return 0;
 }
-

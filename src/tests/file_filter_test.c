@@ -2,6 +2,8 @@
  * file_filter_test.c - ensure filter_prune_list handles basic lists
  */
 
+#include "config.h"
+
 #include "filter.h"
 #include "llist.h"
 

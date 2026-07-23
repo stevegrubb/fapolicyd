@@ -7,7 +7,8 @@
  * Public License (LGPL). See the provenance note below.
  */
 
-//#include "config.h"
+#include "config.h"
+
 #include <stddef.h> // for NULL
 #include "avl.h"
 

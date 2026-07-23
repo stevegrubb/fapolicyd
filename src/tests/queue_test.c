@@ -1,6 +1,8 @@
 /*
  * queue_test.c - verify queue metric accounting
  */
+#include "config.h"
+
 #include <errno.h>
 #include <error.h>
 #include <stdio.h>

@@ -43,6 +43,8 @@
  * released directly by attr_set_destroy().
  */
 
+#include "config.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

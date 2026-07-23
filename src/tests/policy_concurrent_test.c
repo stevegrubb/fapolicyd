@@ -6,6 +6,8 @@
  * decisions today, but read-side rule iteration must not depend on the
  * mutable llist cursor before worker threads can be introduced.
  */
+#include "config.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

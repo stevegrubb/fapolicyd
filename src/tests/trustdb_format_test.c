@@ -1,6 +1,8 @@
 // Copyright 2024 Red Hat
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "config.h"
+
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>

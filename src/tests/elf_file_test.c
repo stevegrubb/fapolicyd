@@ -10,6 +10,9 @@
  */
 
 #define _GNU_SOURCE
+
+#include "config.h"
+
 #include <errno.h>
 #include <error.h>
 #include <fcntl.h>

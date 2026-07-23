@@ -1,6 +1,8 @@
 /*
  * decision_timing_report_test.c - timing report formatting tests
  */
+#include "config.h"
+
 #include <error.h>
 #include <stdarg.h>
 #include <stdbool.h>

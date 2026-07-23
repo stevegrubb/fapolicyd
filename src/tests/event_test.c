@@ -1,6 +1,8 @@
 /*
  * event_test.c - unit tests for new_event subject/object cache behavior
  */
+#include "config.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

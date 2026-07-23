@@ -2,6 +2,8 @@
  * cli_privilege_test.c - verify fapolicyd-cli privilege policies
  */
 
+#include "config.h"
+
 #include <error.h>
 #include <stdbool.h>
 #include <stdlib.h>

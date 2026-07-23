@@ -1,6 +1,8 @@
 /*
  * failure_action_test.c - verify internal failure action accounting
  */
+#include "config.h"
+
 #include <error.h>
 #include <stdio.h>
 #include <string.h>

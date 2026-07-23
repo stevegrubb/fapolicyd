@@ -2,8 +2,9 @@
  * escape_test.c - tests for shell escaping helpers
  */
 
-#include "escape.h"
+#include "config.h"
 
+#include "escape.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
